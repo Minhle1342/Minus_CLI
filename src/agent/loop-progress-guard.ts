@@ -111,9 +111,12 @@ export class LoopProgressGuard {
     // Ghi nhận verification command để giải tỏa cảnh báo hyper-mutation
     if (verified) this.fileMutationHistory.length = 0;
 
-    if (WORKSPACE_MUTATING_TOOLS.has(toolName) || isMutationTool(toolName) || hasObservedMutation(toolName, result)) {
+        const isMutation = WORKSPACE_MUTATING_TOOLS.has(toolName) || isMutationTool(toolName) || hasObservedMutation(toolName, result);
+    const actuallyMutated = hasObservedMutation(toolName, result);
+
+    if (isMutation && actuallyMutated) {
       // Ghi nhận file mutation vào quỹ đạo Trajectory
-      const rawFile = String(args.path || args.filePath || args.TargetFile || args.targetFile || args.file || '').trim();
+      const rawFile = String(args.path || args.filePath || args.TargetFile || args.targetFile || args.file || (Array.isArray(args.paths) ? args.paths[0] : '') || '').trim();
       if (rawFile) {
         const normalizedFile = rawFile.replace(/\\/g, '/').toLowerCase();
         this.fileMutationHistory.push({
@@ -144,7 +147,7 @@ export class LoopProgressGuard {
       return { repetitionCount: 0, shouldStop: false };
     }
 
-    if (!GUARDED_INSPECTION_TOOLS.has(toolName) && !isPureVerification && toolName !== 'run_command') {
+    if (!GUARDED_INSPECTION_TOOLS.has(toolName) && !isPureVerification && toolName !== 'run_command' && !isMutation) {
       return { repetitionCount: 0, shouldStop: false };
     }
 

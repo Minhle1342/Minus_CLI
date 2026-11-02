@@ -163,37 +163,57 @@ test('câu trả lời tạm thời nằm ngay TRÊN tool call kế tiếp, bọ
   assert.ok(answerIdx > 0 && !/─{10,}/.test(lines[answerIdx - 1]), 'final answer không bị bọc separator');
 });
 
-test('click dấu + trước dòng Thinking › mở/tắt riêng khối đó', () => {
+test('click dấu ▸ trước dòng thinking mở/tắt riêng khối đó', () => {
   let m = createRootModel({ width: 80, height: 24 });
   [m] = update(kernel('model:thought', ['Dòng 1 của reasoning.\nDòng 2 của reasoning.\nDòng 3 của reasoning.']), m);
   [m] = update(kernel('model:thinking:end', []), m);
   const thought = () => m.viewport.entries.find((e) => e.kind === 'thought')!;
 
-  // Mặc định đóng: có dấu +, nội dung bị ẩn.
+  // Mặc định đóng: một dòng "▸ thinking", toàn bộ nội dung ẩn.
   assert.equal(thought().expanded, undefined, 'khối Thinking mặc định đóng');
   const collapsedText = plain(m);
-  assert.match(collapsedText, /\+ Thinking › Dòng 1 của reasoning\./);
-  assert.ok(!collapsedText.includes('Dòng 3'), 'nội dung sau dòng đầu phải ẩn');
+  assert.match(collapsedText, /▸ thinking/, 'phải có marker ▸');
+  assert.ok(!collapsedText.includes('Dòng 1'), 'collapsed thì không preview nội dung');
 
   // Dưới khối Thinking có separator.
   const collapsedRows = collapsedText.split('\n');
-  const markerRow = collapsedRows.findIndex((l) => /^\s*\+ Thinking/.test(l));
+  const markerRow = collapsedRows.findIndex((l) => /^\s*▸ thinking/.test(l));
   assert.match(collapsedRows[markerRow + 1] ?? '', /─{10,}/, 'khối Thinking phải có separator bên dưới');
 
   // Tìm dòng chứa marker để bấm đúng chỗ.
-  const rows = plain(m).split('\n');
-  const row = rows.findIndex((l) => /^\s*\+ Thinking/.test(l));
+  const rows = collapsedRows;
+  const row = markerRow;
   assert.ok(row >= 0, 'phải tìm thấy dòng có marker');
   const y = row + 1;
 
   [m] = update({ type: 'key', key: 'mouse+press', now: 10, mouse: { x: 1, y } } as Msg, m);
-  assert.equal(thought().expanded, true, 'click vào dấu + phải mở khối Thinking');
-  assert.match(plain(m), /− Thinking › /, 'dấu + đổi thành − khi mở');
+  assert.equal(thought().expanded, true, 'click vào dấu ▸ phải mở khối Thinking');
+  assert.match(plain(m), /▾ thinking/, 'dấu ▸ đổi thành ▾ khi mở');
   assert.ok(plain(m).includes('Dòng 3'), 'mở thì hiện toàn bộ nội dung');
 
   [m] = update({ type: 'key', key: 'mouse+press', now: 11, mouse: { x: 1, y } } as Msg, m);
   assert.equal(thought().expanded, false, 'click lần hai phải thu gọn lại');
   assert.ok(!plain(m).includes('Dòng 3'), 'thu gọn thì ẩn nội dung lại');
+});
+
+test('thinking dùng thời lượng từ kernel lifecycle, không phải wall clock', () => {
+  let m = createRootModel({ width: 80, height: 24 });
+  const startedAt = 100_000;
+  [m] = update(kernel('model:thinking:start', [{ agentId: 'a', turn: 1, step: 1, startedAt }]), m);
+  [m] = update(kernel('model:thought', ['Reasoning đang chạy.']), m);
+  [m] = update(kernel('model:thinking:end', [{ agentId: 'a', turn: 1, step: 1, endedAt: startedAt + 4_200 }]), m);
+
+  const thought = m.viewport.entries.find((e) => e.kind === 'thought')!;
+  assert.equal(thought.ms, 4_200, 'ms lấy từ endedAt - startedAt của kernel');
+  assert.match(plain(m), /▸ thinking 4s/, 'header hiển thị thời lượng đã làm tròn');
+});
+
+test('dòng thinking live chỉ là trạng thái, không rò rỉ prose reasoning', () => {
+  let m = createRootModel({ width: 80, height: 24 });
+  [m] = update(kernel('model:thought', ['Bí mật reasoning không được hiện ra.']), m);
+  const text = plain(m);
+  assert.match(text, /▸ thinking/, 'phải có dòng thinking live');
+  assert.ok(!text.includes('Bí mật reasoning'), 'prose đang stream không được lọt vào transcript');
 });
 
 test('session-transcript on a busy tab preserves live streams and background unread', () => {

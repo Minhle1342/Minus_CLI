@@ -3,7 +3,8 @@ import { formatCompactionStatus } from '../../compaction-status.js';
 import { color, displayWidth, fit, spinnerFrame, tokyoNight } from '../styles/theme.js';
 
 export function headerView(model: RootModel): string {
-  return fit(color(36, ` MINUS · ${model.mode}`) + ` · ${model.sidebar.model} · ${model.sidebar.workspace}`, model.width);
+  const badge = model.fullAccess ? color(tokyoNight.red, ' FULL ACCESS') : '';
+  return fit(color(36, ` MINUS · ${model.mode}`) + badge + ` · ${model.sidebar.model} · ${model.sidebar.workspace}`, model.width);
 }
 
 export interface StatuslineSegment {

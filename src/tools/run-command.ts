@@ -30,6 +30,7 @@ import { findMissingExecutable } from '../sandbox/command-diagnostics.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution, isSafeDevCommand } from '../sandbox/command-isolation-policy.js';
 import { classifyGitCommand, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
 import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText } from '../security/env-scrub.js';
+import { gatesFromPermissionManager } from '../security/full-access-gates.js';
 import { evaluateCommandHooks } from '../sandbox/command-hooks.js';
 import {
   resolveSessionCwd,
@@ -231,12 +232,22 @@ const ALLOWED_COMMAND_PREFIXES = [
   'swiftlint ',
   'swiftformat ',
   'clang-format ',
-  // Docker chỉ-đọc để chẩn đoán sandbox (không cho approvals rộng: subcommands ghi vẫn cần approval)
+  // Docker chẩn đoán & thực thi container database
   'docker ps',
   'docker ps ',
   'docker images',
   'docker images ',
   'docker --version',
+  'docker exec ',
+  // Database CLI clients & query tools
+  'psql ',
+  'mysql ',
+  'sqlite3 ',
+  'mongosh ',
+  'redis-cli ',
+  'pg_dump ',
+  'mysqldump ',
+  'mongodump ',
   // Git commands (Tiêu chuẩn Công nghiệp: Cho phép thao tác Git qua run_command, chặn unrequested push lên main)
   'git status',
   'git status ',
@@ -570,7 +581,8 @@ export function findWorkspaceEscapeViolations(command: string, workspace: Worksp
     for (const candidate of candidates) {
       if (!candidate || SAFE_DEVICE_TARGETS.has(candidate.toLowerCase())) continue;
       if (HOME_EXPANSION.test(candidate)) {
-        violations.push(candidate);
+        // Gate 3: full access bỏ luôn ràng buộc home-directory, không chỉ traversal.
+        if (!workspace.opensGate('workspace_boundary')) violations.push(candidate);
         continue;
       }
       const absolute = path.isAbsolute(candidate) || path.win32.isAbsolute(candidate);
@@ -1313,13 +1325,13 @@ export function resolveRunCommandTimeout(requestedMs: unknown, configuredDefault
 export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Run terminal commands for builds, tests, linting, scripts, and Git. Test policy: NEVER modify test assertions to bypass failures — fix production logic instead; legitimate assertion upgrades must be done as a separate file edit before running tests, preserving or increasing assertion count. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation (ISOLATED_SANDBOX_REQUIRED) rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Allowlist groups (no approval): explore cat/type/head/tail/ls/dir/grep/rg/find/jq, build/test npm/node/npx/bun/python/pytest/dotnet/go/cargo/tsc/eslint/prettier/jest/vitest, lint/format biome/oxlint/stylelint/ruff/black/isort/flake8/mypy/pylint/gofmt/rustfmt/rubocop/phpcs/ktlint/swiftlint/clang-format, git read/write subcommands, docker ps/images. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines (exactly two allowlisted segments, no redirect/substitution, skips approval). Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Single cat/ls/sed/rg calls are auto-emulated via Node.js I/O (<5ms); missing binaries fail fast with a fallback/install hint and auto-provision when a recipe exists. Output is sanitized, test-distilled, truncated (~8000 chars, stderr ~4000) with the full log offloaded to logFilePath: always check exitCode/success/commandOutcome plus logFilePath and verificationOutputComplete before concluding. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with the task manager (explicit long timeouts auto-promote to background after ~10s soft-timeout). Shell cwd/env persists across calls (cd/export stick); repo .minus/hooks.json may add denials; secrets are scrubbed/redacted; idle background tasks emit a one-shot stall notice. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. Do not read, write, delete, move, or rename workspace files through the shell: use dedicated file tools (`list_files`, `search_text`, `read_file`, `write_file`). Moves go through `move_file` with `sourcePath` and `targetPath`. Set `shell: "powershell"` to run a single command under PowerShell instead of the default host shell (quoted strings, `$` and `&` are then safe as written; PowerShell 5.1 has no `&&`, and it is unavailable under Docker isolation). Never include secrets or tokens in commands.',
+    description: 'Run terminal commands for builds, tests, linting, scripts, Git, and database operations. Database access & CLI management: Use run_command to connect, inspect, query, migrate, and manage databases. Discovery: extract connection parameters from project environment/config files (.env, docker-compose.yml) or the user prompt. Execution hierarchy: 1) Docker-First: when database services run in Docker, prioritize `docker exec -i <container_name> <cli> ...` (e.g. `docker exec -i postgres psql -U ... -d ... -c \"...\"`) to use preinstalled container binaries; 2) Native/Isolated CLI: use local/sandbox database tools (`psql`, `mysql`, `sqlite3`, `mongosh`, `redis-cli`) directly. Credential security: ALWAYS isolate passwords into temporary environment variables (e.g. `docker exec -i -e PGPASSWORD=...` or prefixing `PGPASSWORD=...`, `MYSQL_PWD=...`, `REDISCLI_AUTH=...`) rather than putting passwords in command arguments or URLs. Non-interactive policy: ALWAYS pass one-shot execution flags (`-c`, `-e`, `--eval`, or script pipes) — NEVER launch interactive shells/REPLs that wait for TTY stdin. Safety boundaries: Read-only operations (SELECT, SHOW, DESCRIBE, schema inspection) are permitted to answer queries; state modifications (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, migrations) and database backups (pg_dump, mysqldump, mongodump) MUST ONLY be executed when explicitly requested by the user. Test policy: NEVER modify test assertions to bypass failures — fix production logic instead; legitimate assertion upgrades must be done as a separate file edit before running tests, preserving or increasing assertion count. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation (ISOLATED_SANDBOX_REQUIRED) rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Allowlist groups (no approval): explore cat/type/head/tail/ls/dir/grep/rg/find/jq, build/test npm/node/npx/bun/python/pytest/dotnet/go/cargo/tsc/eslint/prettier/jest/vitest, lint/format biome/oxlint/stylelint/ruff/black/isort/flake8/mypy/pylint/gofmt/rustfmt/rubocop/phpcs/ktlint/swiftlint/clang-format, git read/write subcommands, docker ps/images. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines (exactly two allowlisted segments, no redirect/substitution, skips approval). Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Single cat/ls/sed/rg calls are auto-emulated via Node.js I/O (<5ms); missing binaries fail fast with a fallback/install hint and auto-provision when a recipe exists. Output is sanitized, test-distilled, truncated (~8000 chars, stderr ~4000) with the full log offloaded to logFilePath: always check exitCode/success/commandOutcome plus logFilePath and verificationOutputComplete before concluding. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with the task manager (explicit long timeouts auto-promote to background after ~10s soft-timeout). Shell cwd/env persists across calls (cd/export stick); repo .minus/hooks.json may add denials; secrets are scrubbed/redacted; idle background tasks emit a one-shot stall notice. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. For repository code and file edits, prefer dedicated file tools (`list_files`, `search_text`, `read_file`, `write_file`); for databases, container CLI, external APIs, and system diagnostics, use run_command directly. File moves and deletions go through `move_file` with `sourcePath` and `targetPath`; never use shell `mv` or `rm` for workspace files. Set `shell: "powershell"` to run a single command under PowerShell instead of the default host shell (quoted strings, `$` and `&` are then safe as written; PowerShell 5.1 has no `&&`, and it is unavailable under Docker isolation). Never include secrets or tokens in commands.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Use for build, test, lint, script, and Git commands. Default to `auto` (prefers the isolated Internal/sandbox environment when available). For a private GitHub clone/fetch, choose `execution_target: "host"` (External) to use the host Git Credential Manager; public Git can use auto. Never put credentials in Git URLs or commands. Host commands remain subject to host policy, the allowlist, and approval. The runtime enforces the allowlist (explore/build/test/git/docker-read groups); this schema lists groups, not every binary. Commands outside the allowlist may require approval and can still be rejected by policy. Prefer dedicated tools (`list_files`, `search_text`, `read_file`) to browse, search, and read files; do not use the shell to read, write, delete, move, or rename workspace files; never use shell `mv`; moves and deletes go through the file-mutation tools with source and target paths. cat/ls/sed/rg single calls are auto-emulated (<5ms) so they work cross-platform, but dedicated tools save tokens. Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded-output `|` pipelines (two allowlisted segments only). Avoid unrelated chains, subshells/grouping, and `$()`; interactive REPL/vim and complex commands may require approval or are blocked by preflight. Large output is truncated with logFilePath: read it via read_file instead of re-running. Use `timeout_ms` for finite long-running builds/tests, and `WaitMsBeforeAsync` with the task manager for servers/watchers. Git mutations require direct user intent; stage only explicit paths (`git add -- <paths>`, never -A/./wildcards unless the request is an explicit commit); pushes to main/master require approval; system-destructive commands are prohibited.',
+          description: 'Use for build, test, lint, script, Git, and database commands. Database operations: prioritize `docker exec -i` when containerized, isolate credentials via env vars (PGPASSWORD, MYSQL_PWD, REDISCLI_AUTH), use non-interactive one-shot flags, and only execute mutations or backups when explicitly requested by the user. Standard database patterns: PostgreSQL: `PGPASSWORD=secret psql -h localhost -U user -d db -c \"SELECT 1;\"` or `docker exec -i -e PGPASSWORD=secret <container> psql -U user -d db -c \"SELECT 1;\"` (backup: `PGPASSWORD=secret pg_dump -h localhost -U user -d db > backup.sql`); MySQL: `MYSQL_PWD=secret mysql -h 127.0.0.1 -u user db -e \"SHOW TABLES;\"` or `docker exec -i -e MYSQL_PWD=secret <container> mysql -u user db -e \"SHOW TABLES;\"` (backup: `MYSQL_PWD=secret mysqldump -u user db > backup.sql`); SQLite: `sqlite3 db.sqlite \".tables\"` or `sqlite3 db.sqlite \"SELECT * FROM users;\"` (backup: `sqlite3 db.sqlite \".dump\" > backup.sql`); MongoDB: `mongosh --host localhost:27017 -u user --eval \"db.stats()\"` or `docker exec -i <container> mongosh --eval \"db.getCollectionNames()\"`; Redis: `REDISCLI_AUTH=secret redis-cli -h localhost -p 6379 ping` or `docker exec -i -e REDISCLI_AUTH=secret <container> redis-cli info`. Default to `auto` (prefers the isolated Internal/sandbox environment when available). For a private GitHub clone/fetch, choose `execution_target: "host"` (External) to use the host Git Credential Manager; public Git can use auto. Never put credentials in Git URLs or commands. Host commands remain subject to host policy, the allowlist, and approval. The runtime enforces the allowlist (explore/build/test/git/docker-read groups); this schema lists groups, not every binary. Commands outside the allowlist may require approval and can still be rejected by policy. For repository code, prefer dedicated tools (`list_files`, `search_text`, `read_file`); for databases, container CLI, system state, and diagnostics, use run_command directly; never use shell `mv` for workspace files; moves and deletes go through the file-mutation tools with source and target paths. cat/ls/sed/rg single calls are auto-emulated (<5ms) so they work cross-platform, but dedicated tools save tokens. Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded-output `|` pipelines (two allowlisted segments only). Avoid unrelated chains, subshells/grouping, and `$()`; interactive REPL/vim and complex commands may require approval or are blocked by preflight. Large output is truncated with logFilePath: read it via read_file instead of re-running. Use `timeout_ms` for finite long-running builds/tests, and `WaitMsBeforeAsync` with the task manager for servers/watchers. Git mutations require direct user intent; stage only explicit paths (`git add -- <paths>`, never -A/./wildcards unless the request is an explicit commit); pushes to main/master require approval; system-destructive commands are prohibited.',
         },
         CommandLine: {
           type: Type.STRING,
@@ -1348,7 +1360,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       const rawCommand = String(args.command || args.CommandLine || args.commandLine || args.cmd || '').trim();
       let hasExplicitPermission = context?.permissionGranted === true;
       const effectivePermissionManager = context?.permissionManager || permissionManager;
-      const executionTarget = String(args.execution_target || 'auto').trim().toLowerCase();
+      /** Reader gate full access — đọc effectiveMode() live, thiếu nguồn thì đóng. */
+      const gates = gatesFromPermissionManager(effectivePermissionManager);
+      const requestedTarget = String(args.execution_target || 'auto').trim().toLowerCase();
+      // Gate 4 (docker_isolation): full access chạy ở host, bỏ hẳn substrate — trong
+      // container vẫn không ghi được ngoài mount point nên không giữ nổi lời hứa gate 3.
+      const executionTarget = gates('docker_isolation') && requestedTarget === 'auto' ? 'host' : requestedTarget;
       const timeoutMs = resolveRunCommandTimeout(args.timeout_ms, process.env.RUN_COMMAND_TIMEOUT_MS || 120000);
 
       if (!rawCommand) {
@@ -1386,12 +1403,15 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         ? Math.min(10000, Math.max(0, args.WaitMsBeforeAsync))
         : (typeof args.wait_ms_before_async === 'number' ? Math.min(10000, Math.max(0, args.wait_ms_before_async)) : undefined);
 
+      const isolatedTarget = executionTarget !== 'host' && Boolean(sandboxManager?.getStatus?.()?.isIsolated);
+
       // Pre-flight Guardrail: Chặn lệnh interactive (REPL, vim), dev server thiếu wait, lặp test vô ích, chuẩn hóa Windows, và chặn binary không tồn tại
       const preflight = evaluateCommandPreflight(rawCommand, {
         waitMsBeforeAsync,
         lastExecution: (context as any)?.lastCommandExecution,
         workspaceRoot: workspace.rootDir,
         ...(shellMode ? { shell: 'powershell' as const } : {}),
+        isIsolated: isolatedTarget,
       });
 
       if (!preflight.allowed) {
@@ -1427,7 +1447,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Enforce non-bypassable host system-risk policy before emulation or any
       // other dispatch route, not only immediately before native host spawn.
       const hostPolicy = executionTarget === 'host'
-        ? evaluateHostCommandPolicy(effectiveCommand, workspace.rootDir)
+        ? evaluateHostCommandPolicy(effectiveCommand, workspace.rootDir, gates)
         : { allowed: true as const };
       if (!hostPolicy.allowed) {
         return {
@@ -1446,7 +1466,6 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Docker isolation is the stronger boundary, so container paths are left
       // alone when it is active.
       const sessionCwd = resolveSessionCwd(workspace, context?.sessionId);
-      const isolatedTarget = executionTarget !== 'host' && Boolean(sandboxManager?.getStatus?.()?.isIsolated);
 
       // shell: "powershell" không có trong image Linux của Docker sandbox —
       // chặn sớm, trước cả allowlist/approval, để lỗi trả về đúng nguyên nhân.
@@ -1507,7 +1526,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // An explicit host target still goes through approval.
       if (executionTarget === 'auto' && sandboxManager && !canBypassDockerIsolation(effectiveCommand)) {
         const sandboxStatus = sandboxManager.getStatus();
-        if (mustBlockUnisolatedAutoExecution(effectiveCommand, sandboxStatus)) {
+        if (mustBlockUnisolatedAutoExecution(effectiveCommand, sandboxStatus, gates)) {
           return {
             command: effectiveCommand,
             error: 'Docker isolation is unavailable; this command is not classified as read-only, so it requires an isolated execution environment and will not silently fall back to the host.',
@@ -1551,11 +1570,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       // Kích hoạt Interactive Permission Approval nếu lệnh phức tạp, vi phạm push main, chứa toán tử không an toàn, hoặc chứa phân đoạn ngoài allowlist
       const needsApproval = Boolean(shellAnalysis.error)
-        || isComplex
-        || hasDisallowedOperators
+        || (!isolatedTarget && isComplex)
+        || (!isolatedTarget && hasDisallowedOperators)
         || blockedPushToMain
         || gitNeedsApproval
-        || !shellAnalysis.segments.every(isAllowedCommand);
+        || (!isolatedTarget && !shellAnalysis.segments.every(isAllowedCommand));
 
       const permArgs = { ...args, command: rawCommand, CommandLine: rawCommand };
 
@@ -1576,7 +1595,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         // else: no approval channel — fall through to the single denial below.
       }
 
-      if (shellAnalysis.error || (isComplex && !hasExplicitPermission)) {
+      if (shellAnalysis.error || (!isolatedTarget && isComplex && !hasExplicitPermission)) {
         return {
           command: rawCommand,
           error: shellAnalysis.error || 'Complex shell grouping/substitution requires explicit permission.',
@@ -1672,7 +1691,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // Session-aware dispatch context: persistent cwd + accumulated env.
       const dispatchEnv = { ...sessionEnv };
 
-      if (!shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {
+      if (!isolatedTarget && !shellAnalysis.segments.every(isAllowedCommand) && !hasExplicitPermission) {
         const deniedSegments = shellAnalysis.segments.filter((segment) => !isAllowedCommand(segment));
         const misuse = detectFileCommandMisuse(rawCommand);
         return {
@@ -1744,6 +1763,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           turn: context?.turn,
           autoPromoted: false,
           inbox: (context as any)?.inbox,
+          gates,
         });
         const startTime = Date.now();
         if (longLived) {
@@ -2101,7 +2121,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       // Fallback has no sandbox boundary: never inherit the full host env.
-      const fallbackEnv = buildSafeChildEnv(dispatchEnv);
+      const fallbackEnv = buildSafeChildEnv(dispatchEnv, gates);
       const finalizeWithSecrets = (r: Record<string, any>) =>
         finalizeCommandResult({ command: effectiveCommand, ...r, envForRedaction: dispatchEnv }, workspace, advisoryExtra);
       return new Promise((resolve) => {
@@ -2145,7 +2165,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                         timeout: timeoutMs,
                         signal: context?.signal,
                         maxBuffer: MAX_COMMAND_BUFFER_BYTES,
-                        env: buildSafeChildEnv(dispatchEnv),
+                        env: buildSafeChildEnv(dispatchEnv, gates),
                       },
                       (retryErr, retryStdout, retryStderr) => {
                         const retryExit = retryErr ? (retryErr.code ?? 1) : 0;

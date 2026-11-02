@@ -77,7 +77,7 @@ test('DEFAULT_PROMPT_SECTIONS condition functions support dynamic omission while
   const defaultPrompt = assembler.assembleForContext(defaultCtx);
   assert.ok(defaultPrompt.includes('GIT & TESTING RUNTIME OPERATIONS'));
   assert.ok(defaultPrompt.includes('FRONTEND & UI DESIGN STANDARD'));
-  assert.ok(defaultPrompt.includes('CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE'));
+  assert.ok(defaultPrompt.includes('CODEBASE & SYSTEM OPERATIONS'));
   assert.ok(defaultPrompt.includes('MULTI-AGENT ORCHESTRATION & SELF-RELIANCE HANDOVER'));
 
   // Gated context with static inclusion disabled strips redundant static sections
@@ -95,7 +95,7 @@ test('DEFAULT_PROMPT_SECTIONS condition functions support dynamic omission while
   // Git operations has no dynamic-tail replacement, so it always stays static.
   assert.ok(gatedPrompt.includes('GIT & TESTING RUNTIME OPERATIONS'));
   assert.ok(!gatedPrompt.includes('FRONTEND & UI DESIGN STANDARD'));
-  assert.ok(!gatedPrompt.includes('CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE'));
+  assert.ok(!gatedPrompt.includes('CODEBASE & SYSTEM OPERATIONS'));
   assert.ok(!gatedPrompt.includes('TOOL SYNERGY PLAYBOOKS:'));
   assert.ok(!gatedPrompt.includes('MULTI-AGENT ORCHESTRATION & SELF-RELIANCE HANDOVER'));
   // Invariant Core prompt is always present

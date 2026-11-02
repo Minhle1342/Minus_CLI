@@ -30,6 +30,10 @@ export interface CompactionConfig {
   checkpointEveryNToolResults?: number;
   /** Run the native output-masking prepass only after history grows beyond this size. */
   nativePrecompactionThresholdChars?: number;
+  /** Enable compacting active turn drafts early (below 12000 char threshold). */
+  enableEarlyDraftCompaction?: boolean;
+  /** Threshold chars for early draft compaction (default: 5000, was 12000). */
+  earlyDraftCompactionThreshold?: number;
 }
 
 export interface MaskedObservationRecord {

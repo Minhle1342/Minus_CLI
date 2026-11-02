@@ -66,6 +66,7 @@ import type { ClassificationDecision, ToolControlMode } from '../control/classif
 import { ThisTurnToolGate, createToolSurface, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
 import { EDIT_TOOL_NAMES, READ_TOOL_NAMES, ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
 import { checkPhaseToolEffect, isOrchestrationTool } from '../control/phase-tool-effects.js';
+import { gatesFromPermissionManager } from '../security/full-access-gates.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
 import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/typescript-service.js';
@@ -663,6 +664,8 @@ export class AgentLoop {
 
   setWorkspace(workspace: Workspace) {
     this._workspace = workspace;
+    // Gate 3/6 đã có reader toàn cục từ boot (setDefaultWorkspaceGates) — Workspace mới
+    // thừa kế đúng mode, không cần attach theo instance.
     // Workspace switch starts a fresh session epoch (same as SessionManager):
     // per-tab model overrides belong to the old workspace's sessions.
     this.sessionModels.clear();
@@ -1318,6 +1321,7 @@ export class AgentLoop {
     const toolControlMode: ToolControlMode = ['off', 'shadow', 'enforce'].includes(configuredControlMode)
       ? configuredControlMode as ToolControlMode
       : 'shadow';
+    const fullAccessGates = gatesFromPermissionManager(this.kernel?.ctx.permissions ?? this.toolRunner.getPermissionManager());
     const batchPersistenceEnabled = this.loopOptions?.enableBatchSessionPersistence
       ?? envFeatureEnabled('MINUS_BATCH_SESSION_PERSISTENCE');
     if (toolControlMode === 'enforce') {
@@ -1553,7 +1557,7 @@ export class AgentLoop {
           const rejectionMessage = `Agent step rejected: ${preStepDecision.reason || 'pre-step hook rejected execution.'}`;
           session.append('step/end', { turn, step, reason: preStepDecision.reason || 'pre-step-rejected' });
           await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', {
+          await this.agentHooks.notify('agent/after-step', {
             ...hookContext,
             reason: preStepDecision.reason || 'pre-step-rejected',
           });
@@ -1578,7 +1582,7 @@ export class AgentLoop {
           const rejectionMessage = `Agent request rejected: ${requestDecision.reason || 'request hook rejected execution.'}`;
           session.append('step/end', { turn, step, reason: requestDecision.reason || 'request-rejected' });
           await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', {
+          await this.agentHooks.notify('agent/after-step', {
             ...hookContext,
             reason: requestDecision.reason || 'request-rejected',
           });
@@ -1736,6 +1740,7 @@ export class AgentLoop {
         const recommendedToolDecision = this.thisTurnToolGate.decide(classification, this.toolProvider.getAll(), {
           workspaceDir: this._workspace.rootDir,
           userRequest: turnUserRequest,
+          gates: fullAccessGates,
         });
         // Lazy unlock: sau khi một background-task notice được claim, manage_task
         // vào surface (authorized + visible) cho phần còn lại của turn.
@@ -1830,7 +1835,7 @@ export class AgentLoop {
           // Strict Phase-Based Tool Masking (Claude Code Plan Mode Pattern - Mechanism 2):
           // In explore and plan phases, mutation tools are withheld from model-visible schemas so the LLM physically cannot mutate
           // before the harness advances the phase.
-          if (toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
+          if (!fullAccessGates('phase_masking') && toolControlMode !== 'off' && ['explore', 'plan'].includes(classification.phase)) {
             const descriptorRegistry = new ToolDescriptorRegistry();
             activeToolDeclarations = activeToolDeclarations.filter((tool: any) =>
               ['run_command', 'git_command'].includes(tool.name)
@@ -3251,7 +3256,7 @@ export class AgentLoop {
             const continuationReason = `${finishReason}-continuation`;
             session.append('step/end', { turn, step, reason: continuationReason });
             await this.persistSession(session);
-            await this.agentHooks.run('agent/after-step', {
+            await this.agentHooks.notify('agent/after-step', {
               ...hookContext,
               reason: continuationReason,
             });
@@ -3266,7 +3271,7 @@ export class AgentLoop {
           CLI.renderStepFooter();
           session.append('step/end', { turn, step, reason: `${finishReason}-terminal` });
           await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', {
+          await this.agentHooks.notify('agent/after-step', {
             ...hookContext,
             reason: `${finishReason}-terminal`,
           });
@@ -3577,7 +3582,9 @@ export class AgentLoop {
             }
 
 
-            const phaseEffect = checkPhaseToolEffect(this.toolProvider.get(toolName) || { name: toolName } as any,
+            const phaseEffect = fullAccessGates('phase_masking')
+              ? { allowed: true, reason: undefined }
+              : checkPhaseToolEffect(this.toolProvider.get(toolName) || { name: toolName } as any,
               toolArgs, classification.phase, this._workspace.rootDir);
             const mutationPaths = scopedMutationTargets(toolName, toolArgs);
             const domainBlock = (mutationPaths.length ? mutationPaths : ['']).map(target =>
@@ -4797,7 +4804,7 @@ export class AgentLoop {
             ...(parallelToolExecution ? { parallelToolExecution } : {}),
           });
           await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', {
+          await this.agentHooks.notify('agent/after-step', {
             ...hookContext,
             reason: stepReason,
           });
@@ -4966,7 +4973,7 @@ export class AgentLoop {
             CLI.renderStepFooter();
             session.append('step/end', { turn, step, reason: 'continuation-requested' });
             await this.persistSession(session);
-            await this.agentHooks.run('agent/after-step', {
+            await this.agentHooks.notify('agent/after-step', {
               ...hookContext,
               reason: 'continuation-requested',
             });
@@ -4981,7 +4988,7 @@ export class AgentLoop {
             CLI.renderStepFooter();
             session.append('step/end', { turn, step, reason: 'missing-final-answer' });
             await this.persistSession(session);
-            await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'missing-final-answer' });
+            await this.agentHooks.notify('agent/after-step', { ...hookContext, reason: 'missing-final-answer' });
             this.eventBus?.emit('step:after', step, { sessionId: session.id });
             await this.endTurn(session, turn, effectiveMaxSteps, isGoal, 'missing-final-answer');
             this.goalManager.disarm();
@@ -5016,7 +5023,7 @@ export class AgentLoop {
           CLI.renderStepFooter();
           session.append('step/end', { turn, step, reason: 'subagent-takeover' });
           await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'subagent-takeover' });
+          await this.agentHooks.notify('agent/after-step', { ...hookContext, reason: 'subagent-takeover' });
           this.eventBus?.emit('step:after', step, { sessionId: session.id });
           continue;
         }
@@ -5043,7 +5050,7 @@ export class AgentLoop {
             : 'incomplete-plan-final-answer-terminal';
           session.append('step/end', { turn, step, reason: planReason });
           await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', {
+          await this.agentHooks.notify('agent/after-step', {
             ...hookContext,
             reason: planReason,
           });
@@ -5261,7 +5268,7 @@ export class AgentLoop {
               : 'incomplete-final-answer-terminal';
             session.append('step/end', { turn, step, reason: incompleteFinalReason });
             await this.persistSession(session);
-            await this.agentHooks.run('agent/after-step', {
+            await this.agentHooks.notify('agent/after-step', {
               ...hookContext,
               reason: incompleteFinalReason,
             });
@@ -5314,7 +5321,7 @@ export class AgentLoop {
           CLI.renderStepFooter();
           session.append('step/end', { turn, step, reason: 'background-wait' });
           await this.persistSession(session);
-          await this.agentHooks.run('agent/after-step', { ...hookContext, reason: 'background-wait' });
+          await this.agentHooks.notify('agent/after-step', { ...hookContext, reason: 'background-wait' });
           this.eventBus?.emit('step:after', step, { sessionId: session.id });
           continue;
         }
@@ -5350,7 +5357,7 @@ export class AgentLoop {
         session.addModelMessage({ text: finalAnswer, rawContent: response.rawContent });
         session.append('step/end', { turn, step, reason: 'final-answer' });
         await this.persistSession(session);
-        await this.agentHooks.run('agent/after-step', {
+        await this.agentHooks.notify('agent/after-step', {
           ...hookContext,
           reason: 'final-answer',
         });
@@ -5872,7 +5879,7 @@ export class AgentLoop {
     turnUserRequest?: string,
     finalAnswer?: string,
   ): Promise<void> {
-    await this.agentHooks.run('agent/turn-stopping', {
+    await this.agentHooks.notify('agent/turn-stopping', {
       session,
       turn,
       maxSteps,

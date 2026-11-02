@@ -134,7 +134,7 @@ export const SLASH_COMMANDS: readonly SlashCommandDefinition[] = [
   { command: '/skills', usage: '/skills [inspect] [id]', description: 'Show Superpowers skills', category: 'Superpowers' },
   { command: '/capabilities', usage: '/capabilities [category|name|inspect]', description: 'Show capability catalog', category: 'Superpowers' },
   { command: '/approvals', usage: '/approvals [approve|reject] [id]', description: 'Handle approval requests', category: 'Security' },
-  { command: '/permissions', usage: '/permissions [mode|reset|project <mode|clear|status>]', description: 'Configure file/command approval policy (always_ask, ask_sensitive, auto_approve, read_only), incl. per-project override', category: 'Security', aliases: ['/permission', '/perm'] },
+  { command: '/permissions', usage: '/permissions [mode|reset|project <mode|clear|status>]', description: 'Configure file/command approval policy (always_ask, ask_sensitive, auto_approve, read_only, full_access), incl. per-project override. No argument opens the interactive picker', category: 'Security', aliases: ['/permission', '/perm'] },
   { command: '/undo', description: 'Undo the most recent checkpoint', category: 'Shadow Git', aliases: ['/rollback'] },
   { command: '/checkpoints', description: 'Show checkpoint history', category: 'Shadow Git' },
   { command: '/diff', description: 'Show the unified diff of the current task', category: 'Shadow Git' },

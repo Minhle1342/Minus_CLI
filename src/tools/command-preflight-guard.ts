@@ -233,6 +233,7 @@ export interface EvaluateCommandPreflightOptions {
   workspaceRoot?: string;
   /** Opt-in shell (run_command `shell: "powershell"`); skips cmd.exe-only normalization. */
   shell?: 'powershell';
+  isIsolated?: boolean;
 }
 
 /**
@@ -249,7 +250,9 @@ export function evaluateCommandPreflight(
 
   const raw = command.trim();
   const { normalizedCommand, extractedEnv } = normalizeWindowsCommand(raw, { shell: options?.shell });
-  const nonInteractiveRemote = /^(?:ssh\b.*(?:-o\s*batchmode=yes|-obatchmode=yes)|sftp\b.*\s-b\b|ftp\b.*\s-n\b)/i.test(normalizedCommand);
+  const remoteProtocol = /^(?:ssh|telnet|ftp|sftp)\b/i.test(normalizedCommand);
+  const nonInteractiveRemote = (Boolean(options?.isIsolated) && remoteProtocol)
+    || /^(?:ssh\b.*(?:-o\s*batchmode=yes|-obatchmode=yes)|sftp\b.*\s-b\b|ftp\b.*\s-n\b)/i.test(normalizedCommand);
   const versionOrHelpProbe = /^(?:vim|vi|nano|pico|emacs|less|more|man)\b.*(?:--version|--help|\s-h)\b/i.test(normalizedCommand);
 
   // 1. Chặn lệnh tương tác treo (REPL, vim, nano, npm init)

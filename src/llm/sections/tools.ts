@@ -88,15 +88,12 @@ export const SECTION_ANTIGRAVITY_TOOLS = `### COMMAND & WEB RETRIEVAL TOOLCHAIN:
    - run_command: Run fast commands (<5s) synchronously; ${PROACTIVE_SERVER_LAUNCH_RULE}
    - Web retrieval: Use web_search and web_fetch for third-party docs, APIs, and web inspection.`;
 
-export const SECTION_CODEBASE_INTELLIGENCE = `### CODEBASE ARCHITECTURE & SEMANTIC INTELLIGENCE:
-   - Use list_files to inspect directory layouts, explore folder contents, or find files by name/glob (use path: "." for workspace root).
-   - Use search_text ONLY to search inside file contents; never pass "." or a file path to search_text to list files.
-   - Inspect exact implementation lines with read_file.
-   - Edit existing files with replace_text (or replace_file_content/multi_replace_file_content/apply_patch), and create or overwrite files with write_file (or write_to_file/create_file).
-   - Use run_command for build, git, and test verification.`;
+export const SECTION_CODEBASE_INTELLIGENCE = `### CODEBASE & SYSTEM OPERATIONS:
+   - Workspace files: use list_files for directory layouts/globs (path "." for workspace root); use search_text ONLY to search inside file contents; inspect exact lines with read_file; edit with replace_text or write_file.
+   - Runtime, system & databases: use run_command freely for shell commands, container execution, database queries, network tools, build, and test verification at any step.`;
 
 export const SECTION_TOOL_PLAYBOOKS = `### TOOL SYNERGY PLAYBOOKS:
-   - Dynamic per-step tool chain: explore with list_files and search_text, inspect with read_file, edit with replace_text or write_file, verify with run_command.`;
+   - Dynamic per-step tool selection: freely select the most appropriate tools for the task — file tools for workspace code, and run_command for runtime environment, databases, and testing.`;
 
 /** Small cache-safe tail modules selected by StepPromptPolicy. */
 export const TOOL_PLAYBOOK_PROMPTS = {

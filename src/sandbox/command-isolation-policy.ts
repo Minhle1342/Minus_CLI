@@ -2,6 +2,7 @@ import path from 'node:path';
 import { analyzeShellCommand } from '../security/shell-segmenter.js';
 import type { SandboxStatus } from './types.js';
 import { isDockerIsolationDisabled, canBypassDockerIsolation } from '../tools/command-outcome.js';
+import type { GateReader } from '../security/full-access-gates.js';
 
 export interface HostCommandPolicyResult {
   allowed: boolean;
@@ -71,7 +72,9 @@ export function requiresIsolatedExecution(command: string): boolean {
 }
 
 /** Only enforce fail-closed behaviour for an unexpected Docker-to-local downgrade. */
-export function mustBlockUnisolatedAutoExecution(command: string, status: SandboxStatus): boolean {
+export function mustBlockUnisolatedAutoExecution(command: string, status: SandboxStatus, gates?: GateReader): boolean {
+  // Gate 4 (docker_isolation): full access hứa "chạy được ở host", nên downgrade không còn là lý do chặn.
+  if (gates?.('docker_isolation')) return false;
   if (isDockerIsolationDisabled() || canBypassDockerIsolation(command)) {
     return false;
   }
@@ -82,7 +85,9 @@ export function mustBlockUnisolatedAutoExecution(command: string, status: Sandbo
 }
 
 /** Approval is necessary for host execution, but never sufficient for system-destructive commands. */
-export function evaluateHostCommandPolicy(command: string, workspaceRoot?: string): HostCommandPolicyResult {
+export function evaluateHostCommandPolicy(command: string, workspaceRoot?: string, gates?: GateReader): HostCommandPolicyResult {
+  // Gate 2 (host_system_risk): full access bỏ chặn "phá hệ thống" — kể cả xóa workspace root.
+  if (gates?.('host_system_risk')) return { allowed: true };
   // Recursive delete of the workspace root itself: non-approvable data loss
   // (repo + .git gone after one approval click).
   if (workspaceRoot && deletesWorkspaceRoot(command, workspaceRoot)) {

@@ -504,6 +504,14 @@ export function formatCompactionCard(text: string, width: number, collapsed: boo
   return [topBorder, ...boxed, bottomBorder];
 }
 
+/** `thinking 3s` — duration only once a second elapsed and the block was timed. */
+function thinkingLabel(ms?: number): string {
+  if (ms === undefined || !Number.isFinite(ms) || ms < 1_000) return 'thinking';
+  const seconds = Math.round(ms / 1000);
+  if (seconds < 60) return `thinking ${seconds}s`;
+  return `thinking ${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
 /**
  * Entry nào kết thúc bằng separator (divider)?
  * - tool result (✔/✖/⊘) đóng cặp call+result
@@ -530,25 +538,19 @@ function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, p
         // final answer nhưng bị bọc 2 separator để không bị đọc như kết quả cuối.
         const isAnswerLike = entry.kind === 'answer' || entry.kind === 'live';
         if (entry.kind === 'thought') {
-          // Khối Thinking mặc định ĐÓNG: chỉ hiện dòng đầu + dấu "+" để bấm mở.
-          // Mở thì hiện "−" và toàn bộ nội dung.
+          // Khối Thinking mặc định ĐÓNG: một dòng ▸ thinking <dur>. Mở thì ▸ → ▾ và
+          // toàn bộ nội dung markdown. Không preview dòng đầu — transcript đọc phẳng.
           const expanded = entry.expanded === true;
-          const marker = color(expanded ? tokyoNight.muted : tokyoNight.purple, expanded ? '−' : '+');
-          const label = color(tokyoNight.muted, 'Thinking › ');
-          const raw = stripTerminalControls(entry.text).split('\n')[0] || '';
-          const avail = Math.max(8, width - 12);
-          const preview = raw.length > avail ? raw.slice(0, avail - 1) + '…' : raw;
-          const body = expanded
-            ? formatAnswer(entry.text, width)
-            : formatAnswerInline(preview, tokyoNight.muted);
-          rendered = wrap(marker + ' ' + label + body, width);
+          const marker = color(expanded ? tokyoNight.muted : tokyoNight.purple, expanded ? '▾' : '▸');
+          const label = color(tokyoNight.muted, thinkingLabel(entry.ms));
+          const header = `${marker} ${label}`;
+          // Body goes through the same wrap pipeline as before so long lines stay inside width.
+          rendered = wrap(expanded ? `${header}\n${formatAnswer(entry.text, width)}` : header, width);
           widths.set(width, rendered);
         } else {
           const prefix = entry.kind === 'user' ? 'You › ' : isAnswerLike ? 'Minus › ' : '';
           const prefixColor = entry.kind === 'user' ? tokyoNight.blue : isAnswerLike ? tokyoNight.purple : tokyoNight.muted;
           const textColor = entry.kind === 'tool' ? tokyoNight.cyan : entry.kind === 'step' ? tokyoNight.yellow : tokyoNight.text;
-          // Thinking is model prose: same markdown pipeline as the answer, the
-          // muted "Thinking › " prefix keeps it visually subordinate.
           const body = isAnswerLike ? formatAnswer(entry.text, width)
             : entry.kind === 'tool' ? formatTool(entry.text)
             : color(textColor, stripTerminalControls(entry.text));
@@ -570,7 +572,7 @@ function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, p
       return [...(prevClosedPair ? [] : [pairDivider]), ...rendered, pairDivider];
     }
     if (entry.kind === 'thought') {
-      // Thinking tự quản lý trạng thái mở/đóng (dấu +/−) → không bị Ctrl+O ép.
+      // Thinking tự quản lý trạng thái mở/đóng (dấu ▸/▾) → không bị Ctrl+O ép.
       // Kết thúc bằng separator để tách khỏi entry kế tiếp.
       return [...rendered, pairDivider];
     }
@@ -613,11 +615,11 @@ export function viewportLines(model: ViewportModel, width: number): string[] {
   // Vẽ ở tầng render nên live + history replay đều có, không tốn entry.
   const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, width)));
   const lines = model.entries.flatMap((entry, i) => entryLines(entry, width, model.collapsed, pairDivider, i > 0 && endsWithDivider(model.entries[i - 1])));
-  // TUI: thinking is ephemeral (archived into a thought entry on flush) — show
-  // only the tail as one flattened line so the stream never floods the viewport.
+  // TUI: thinking is ephemeral (archived into a thought entry on flush) — one
+  // status row with the live elapsed time, never the reasoning prose.
   if (model.thinking) {
-    const tail = stripTerminalControls(model.thinking).replace(/\s+/g, ' ').trim().slice(-240);
-    lines.push(...wrap(color(tokyoNight.muted, '… Thinking › ' + tail), width));
+    const elapsed = model.thinkingStartedAt ? Date.now() - model.thinkingStartedAt : undefined;
+    lines.push(...wrap(color(tokyoNight.purple, '▸ ') + color(tokyoNight.muted, thinkingLabel(elapsed)), width));
   }
   // P1: streaming answer keeps an ellipsis marker so it reads differently from a final `Minus ›` answer.
   if (model.answerStream) lines.push(...wrap(color(tokyoNight.purple, 'Minus … › ') + formatAnswer(model.answerStream, width), width));
@@ -918,7 +920,7 @@ export function eventOwnerId(model: RootModel, ownerOverride?: string): string {
 }
 
 /**
- * Click chuột lên dấu "+/−" trước dòng "Thinking ›" → trả về index của entry
+ * Click chuột lên dấu "▸/▾" trước dòng "thinking" → trả về index của entry
  * thought tương ứng (undefined nếu không trúng).
  * Toạ độ chuột 1-based (x=1 là cột đầu tiên), viewport bắt đầu ở dòng y=3
  * (header + session tab-strip) — cùng quy ước với selection.
@@ -938,7 +940,7 @@ export function thoughtToggleHit(
   const strip = model.height > 4 ? 1 : 0;
   const row = y - 2 - strip;
   if (row < 0 || first + row >= lines.length) return undefined;
-  if (!/^[+−]\s/.test(stripTerminalControls(lines[first + row]))) return undefined;
+  if (!/^[▸▾]\s/.test(stripTerminalControls(lines[first + row]))) return undefined;
 
   // Dòng này thuộc entry nào? Đếm số dòng mỗi entry đóng góp.
   const pairDivider = color(tokyoNight.border, '─'.repeat(Math.max(0, mainWidth)));
@@ -1009,24 +1011,48 @@ export function ownerReplaceLastEntry(
 /** Nối stream chunk (thinking/answerStream) vào buffer của owner. */
 export function ownerStream(model: RootModel, field: 'thinking' | 'answerStream', chunk: string, ownerOverride?: string): RootModel {
   const owner = eventOwnerId(model, ownerOverride);
+  // Keep whatever clock the lifecycle event seeded; a burst with no lifecycle event
+  // starts its own clock at the first chunk so "thinking 3s" always has a floor.
   if (owner === model.sessions.activeId || !model.sessions.tabs.some(t => t.id === owner)) {
-    return { ...model, viewport: { ...model.viewport, [field]: model.viewport[field] + chunk } };
+    return { ...model, viewport: { ...model.viewport, [field]: model.viewport[field] + chunk,
+      ...(field === 'thinking' ? { thinkingStartedAt: model.viewport.thinkingStartedAt ?? Date.now() } : {}) } };
   }
   const tabs = model.sessions.tabs.map(t => t.id === owner
-    ? { ...t, [field]: (t[field] || '') + chunk, lastActive: Date.now() }
+    ? { ...t, [field]: (t[field] || '') + chunk,
+        ...(field === 'thinking' ? { thinkingStartedAt: t.thinkingStartedAt ?? Date.now() } : {}),
+        lastActive: Date.now() }
     : t);
   return { ...model, sessions: { ...model.sessions, tabs } };
 }
 
-/** Flush thinking buffer của owner thành thought entry (không đụng viewport tab khác). */
-export function ownerArchiveThinking(model: RootModel, ownerOverride?: string): RootModel {
+/** Seed the thinking clock from the kernel lifecycle event; chunks alone also start it. */
+export function ownerNoteThinkingStart(model: RootModel, startedAt: number | undefined, ownerOverride?: string): RootModel {
   const owner = eventOwnerId(model, ownerOverride);
+  const clock = { thinkingStartedAt: typeof startedAt === 'number' ? startedAt : Date.now() };
+  if (owner === model.sessions.activeId || !model.sessions.tabs.some(t => t.id === owner)) {
+    return { ...model, viewport: { ...model.viewport, ...clock } };
+  }
+  const tabs = model.sessions.tabs.map(t => t.id === owner ? { ...t, ...clock } : t);
+  return { ...model, sessions: { ...model.sessions, tabs } };
+}
+
+/** Flush thinking buffer của owner thành thought entry (không đụng viewport tab khác). */
+export function ownerArchiveThinking(model: RootModel, ownerOverride?: string, endedAt?: number): RootModel {
+  const owner = eventOwnerId(model, ownerOverride);
+  const finishedAt = endedAt ?? Date.now();
   if (owner === model.sessions.activeId || !model.sessions.tabs.some(t => t.id === owner)) {
     if (!model.viewport.thinking) return model;
-    return { ...model, viewport: { ...appendEntry(model.viewport, { kind: 'thought', text: model.viewport.thinking }), thinking: '' } };
+    const ms = model.viewport.thinkingStartedAt ? Math.max(0, finishedAt - model.viewport.thinkingStartedAt) : undefined;
+    return { ...model, viewport: {
+      ...appendEntry(model.viewport, { kind: 'thought', text: model.viewport.thinking, ms }),
+      thinking: '',
+      thinkingStartedAt: undefined,
+    } };
   }
   const tabs = model.sessions.tabs.map(t => (t.id === owner && t.thinking)
-    ? { ...t, entries: [...(t.entries || []).slice(-999), { kind: 'thought' as const, text: t.thinking }], thinking: '', unread: (t.unread || 0) + 1 }
+    ? { ...t, entries: [...(t.entries || []).slice(-999), { kind: 'thought' as const, text: t.thinking,
+        ms: t.thinkingStartedAt ? Math.max(0, finishedAt - t.thinkingStartedAt) : undefined }],
+        thinking: '', thinkingStartedAt: undefined, unread: (t.unread || 0) + 1 }
     : t);
   return { ...model, sessions: { ...model.sessions, tabs } };
 }
@@ -1059,10 +1085,11 @@ export function ownerFlushLiveAnswer(model: RootModel, ownerOverride?: string): 
 /** Xóa stream buffer của owner sau khi flush (final_answer). */
 export function ownerClearStream(model: RootModel, field: 'thinking' | 'answerStream', ownerOverride?: string): RootModel {
   const owner = eventOwnerId(model, ownerOverride);
+  const clock = field === 'thinking' ? { thinking: '', thinkingStartedAt: undefined } : { [field]: '' };
   if (owner === model.sessions.activeId || !model.sessions.tabs.some(t => t.id === owner)) {
-    return { ...model, viewport: { ...model.viewport, [field]: '' } };
+    return { ...model, viewport: { ...model.viewport, ...clock } };
   }
-  const tabs = model.sessions.tabs.map(t => t.id === owner ? { ...t, [field]: '' } : t);
+  const tabs = model.sessions.tabs.map(t => t.id === owner ? { ...t, ...clock } : t);
   return { ...model, sessions: { ...model.sessions, tabs } };
 }
 

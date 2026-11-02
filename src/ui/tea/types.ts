@@ -1,5 +1,6 @@
 import type { KernelEvents } from '../../kernel/kernel.js';
 import type { CompactionStatus } from '../compaction-status.js';
+import type { PermissionMode } from '../../security/permission-manager.js';
 
 export type KernelMsg = { [K in keyof KernelEvents]: { type: 'kernel'; event: K; args: Parameters<KernelEvents[K]> } }[keyof KernelEvents];
 export interface KeyMsg { type: 'key'; key: string; text?: string; mouse?: { x: number; y: number }; now: number }
@@ -15,6 +16,8 @@ export type Msg = KeyMsg | KernelMsg
   | { type: 'grill'; open: boolean; question?: string; options?: GrillOption[]; loading?: boolean; sessionId?: string }
   | { type: 'grill-loading'; loading: boolean }
   | { type: 'model-picker'; open: boolean; options?: ModelPickerOption[]; sessionId?: string }
+  | { type: 'permission'; open: boolean; state?: PermissionStateSnapshot; sessionId?: string }
+  | { type: 'full-access'; on: boolean }
   | { type: 'sessions'; open?: boolean; tabs?: SessionTab[]; activeId?: string }
   | { type: 'sessions-adopt'; activeId: string }
   | { type: 'session-transcript'; sessionId: string; entries: TranscriptEntry[] }
@@ -43,6 +46,8 @@ export type Cmd = { type: 'submit' | 'answer'; text: string }
   | { type: 'grill-cancel' }
   | { type: 'model-pick'; id: string; name: string }
   | { type: 'model-cancel' }
+  | { type: 'permission-pick'; choice: PermissionChoice }
+  | { type: 'permission-cancel' }
   | { type: 'session-switch'; sessionId: string }
   | { type: 'session-new'; sessionId?: string }
   | { type: 'session-close'; sessionId: string }
@@ -53,7 +58,7 @@ export type Cmd = { type: 'submit' | 'answer'; text: string }
   | { type: 'file-open'; path: string }
   | { type: 'mode'; mode: Mode };
 export type Mode = 'PLAN' | 'IMPLEMENT';
-export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff' | 'file' | 'grill' | 'sessions' | 'model-picker' | 'subagents';
+export type Focus = 'composer' | 'viewport' | 'sidebar' | 'palette' | 'diff' | 'file' | 'grill' | 'sessions' | 'model-picker' | 'permission' | 'subagents';
 export interface GrillOption { id: string; label: string; detail?: string; source: 'llm' | 'heuristic' | 'user' }
 export interface GrillModel { open: boolean; question: string; options: GrillOption[]; selected: number; loading: boolean; /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string; customInput?: { active: boolean; value: string; cursor: number } }
 /** Một entry trong modal chọn model (/model): mirror AVAILABLE_MODELS của cli-ui. */
@@ -61,6 +66,27 @@ export interface ModelPickerOption { id: string; name: string; desc?: string; pr
 /** Modal chọn model đè lên viewport — cùng ngôn ngữ visual/key với grill. */
 export interface ModelPickerModel { open: boolean; options: ModelPickerOption[]; selected: number; /** chuỗi lọc fuzzy (mirror palette query) */ query: string; /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string }
 export interface SubagentsModalModel { open: boolean; selected: number }
+/** Tầng của permission modal: menu hành động → danh sách value của một hành động. */
+export type PermissionTier = 'actions' | 'global' | 'project' | 'reset';
+/** Trạng thái permission mà outer (slash) cấp khi mở modal — modal không tự đọc kernel. */
+export interface PermissionStateSnapshot {
+  globalMode: PermissionMode;
+  projectMode: PermissionMode | null;
+  effectiveMode: PermissionMode;
+  planModeActive: boolean;
+  approvalCount: number;
+}
+/** Lựa chọn hoàn tất trong modal; outer áp dụng rồi mới báo kết quả. */
+export interface PermissionChoice {
+  action: 'set-global' | 'set-project' | 'clear-project' | 'reset-approvals';
+  mode?: PermissionMode;
+}
+export interface PermissionPickerModel extends PermissionStateSnapshot {
+  open: boolean;
+  tier: PermissionTier;
+  selected: number;
+  /** session sở hữu modal (mặc định tab đang xem lúc mở) */ sessionId?: string;
+}
 export interface Completion { label: string; value: string; cursor?: number; kind?: 'file' | 'session' }
 export interface ComposerModel {
   selection?: { anchor: number; head: number };
@@ -69,11 +95,11 @@ export interface ComposerModel {
   draft: string; completions: Completion[]; selected: number; completionDismissed: boolean;
 }
 export interface PermissionCard { toolName: string; target: string; summary: string; riskLevel: string; category: string; suggestedTool?: string; diff?: string }
-export interface TranscriptEntry { kind: 'user' | 'answer' | 'live' | 'thought' | 'tool' | 'step' | 'log' | 'permission' | 'compaction'; text: string; permission?: PermissionCard; expanded?: boolean }
+export interface TranscriptEntry { kind: 'user' | 'answer' | 'live' | 'thought' | 'tool' | 'step' | 'log' | 'permission' | 'compaction'; text: string; permission?: PermissionCard; expanded?: boolean; /** thinking blocks only: duration in ms, absent when replayed from history */ ms?: number }
 /** Một tab = một session chạy song song trong cùng cửa sổ terminal. Entries cache giữ transcript riêng mỗi tab. */
-export interface SessionTab { id: string; title: string; busy?: boolean; hidden?: boolean; awaitingInput?: boolean; /** true khi đã biết chắc có/không lịch sử (tab mới tạo hoặc đã hydrate) */ historyKnown?: boolean; /** stream buffer riêng để task nền không lọt vào viewport tab khác */ thinking?: string; answerStream?: string; /** số entries mới khi tab chạy nền */ unread?: number; /** chrome riêng theo tab: draft/input, diff, tools đang chạy, tokens */ composer?: ComposerModel; diff?: DiffViewerModel; tools?: string[]; tokens?: number; /** model tường minh của tab (/model scope theo tab); undefined = theo default chung */ model?: string; lastActive?: number; entries?: TranscriptEntry[]; /** tab transcript của subagent — chỉ để xem, không gõ vào */ subagent?: boolean }
+export interface SessionTab { id: string; title: string; busy?: boolean; hidden?: boolean; awaitingInput?: boolean; /** true khi đã biết chắc có/không lịch sử (tab mới tạo hoặc đã hydrate) */ historyKnown?: boolean; /** stream buffer riêng để task nền không lọt vào viewport tab khác */ thinking?: string; answerStream?: string; thinkingStartedAt?: number; /** số entries mới khi tab chạy nền */ unread?: number; /** chrome riêng theo tab: draft/input, diff, tools đang chạy, tokens */ composer?: ComposerModel; diff?: DiffViewerModel; tools?: string[]; tokens?: number; /** model tường minh của tab (/model scope theo tab); undefined = theo default chung */ model?: string; lastActive?: number; entries?: TranscriptEntry[]; /** tab transcript của subagent — chỉ để xem, không gõ vào */ subagent?: boolean }
 export interface SessionTabsModel { open: boolean; selected: number; tabs: SessionTab[]; activeId: string; activeQuestionSessionId?: string; /** model mặc định chung cho tab chưa chọn riêng (đồng bộ từ global /model + metadata) */ defaultModel?: string; /** switch do TEA khởi xướng, kernel chưa confirm — metadata không được revert */ pendingActiveId?: string }
-export interface ViewportModel { entries: TranscriptEntry[]; thinking: string; answerStream: string; offset: number; pinned: boolean; collapsed: boolean }
+export interface ViewportModel { entries: TranscriptEntry[]; thinking: string; answerStream: string; offset: number; pinned: boolean; collapsed: boolean; /** epoch ms of the first thinking chunk in the live buffer */ thinkingStartedAt?: number }
 export interface SidebarModel { visible: boolean; workspace: string; model: string; session: string; sessions: string[]; tools: string[]; files: string[]; invariants: string[]; tokens: number; maxTokens: number; /** dòng đang chọn trong MODIFIED FILES khi sidebar có focus */ selected?: number;
   /** Model mặc định chung (carrier cho metadata, không render trực tiếp — sidebar.model luôn là model của tab đang xem). */
   defaultModel?: string;
@@ -87,10 +113,13 @@ export interface StatuslineModel { busy: boolean; aborting: boolean; step: numbe
 export interface RootModel {
   selection?: { target: 'composer' | 'viewport'; anchor: number; head: number; dragging: boolean; lines?: string[]; sourceLines?: string[]; entries?: TranscriptEntry[]; width?: number; viewportOffset?: number; composerCursor?: number };
   width: number; height: number; mode: Mode; focus: Focus; leaderUntil: number;
+  /** Badge FULL ACCESS thường trực — do Outer đẩy khi effectiveMode() đổi. */
+  fullAccess?: boolean;
   composer: ComposerModel; viewport: ViewportModel; sidebar: SidebarModel;
   palette: PaletteModel; diff: DiffViewerModel; file: FileViewModel; status: StatuslineModel;
   grill: GrillModel;
   modelPicker: ModelPickerModel;
+  permission: PermissionPickerModel;
   sessions: SessionTabsModel;
   subagents: SubagentsModalModel;
   previousActiveSessionId?: string;

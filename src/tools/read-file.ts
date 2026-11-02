@@ -17,7 +17,7 @@ import { nativeBatchReadFilesAsync } from '../native/index.js';
  */
 export const readFileTool: ToolDefinition = {
   name: 'read_file',
-  description: 'Primary workspace file reader, returning a contentHash for safe edits. Choose scope before reading: (1) Known declaration: use symbol; omit line boundaries. (2) Known location from search, a stack trace, or outline: supply both startLine and endLine (or offset and limit), covering only the relevant block and nearby context. (3) Unknown location in a large/unknown file: use outlineOnly or search first; do not read every page to locate code. (4) Omit scope only for a small file whose entire content is needed, a directory listing, or an initial bounded preview. hasMore is availability metadata, not an instruction to read the whole file. Stop once evidence is sufficient; reuse already-read content. Line reads allow up to 800 lines; lines over 2,000 characters are truncated. Unscoped files over 350 lines or 200KB return a 120-line preview plus outline. TS/JS symbol extraction uses the compiler AST; Python uses indentation boundaries.',
+  description: 'Primary workspace file reader, returning a contentHash for safe edits. Choose scope before reading: (1) Known declaration: use symbol; omit line boundaries. (2) Known location from search, a stack trace, or outline: supply both startLine and endLine (or offset and limit), covering only the relevant block and nearby context. (3) Unknown location in a large/unknown file: use outlineOnly or search first; do not read every page to locate code. (4) Omit scope only for a small file whose entire content is needed, a directory listing, or an initial bounded preview. hasMore is availability metadata, not an instruction to read the whole file. Stop once evidence is sufficient; reuse already-read content. Line reads allow up to 800 lines; lines over 2,000 characters are truncated. Unscoped files over 350 lines or 200KB return a 120-line preview plus outline. TS/JS symbol extraction uses the compiler AST; Python uses indentation boundaries. Output lines carry an "N: " line-number prefix; replace_text auto mode strips those prefixes when every non-empty line is numbered and aligned, and rejects misaligned numbering. For byte-exact copying prefer includeLineNumbers:false, and keep the returned contentHash for replace_text expectedFileHash.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -51,7 +51,7 @@ export const readFileTool: ToolDefinition = {
       },
       includeLineNumbers: {
         type: Type.BOOLEAN,
-        description: 'Defaults to true. Set to false when copying unmodified content into replace_text oldText.',
+        description: 'Defaults to true. Set to false when copying content into replace_text oldText; replace_text auto-strips "N: " prefixes in auto mode when all non-empty lines are numbered and aligned.',
       },
     },
     required: ['path'],

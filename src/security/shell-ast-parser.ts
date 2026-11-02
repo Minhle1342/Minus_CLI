@@ -386,7 +386,7 @@ export function detectShellObfuscation(command: string): { isObfuscated: boolean
 
   // 2. Dynamic evaluation primitives (eval, exec, source)
   // Exclude legitimate tool runners like `pnpm exec`, `npm exec`, `bundle exec`, `yarn exec`, `docker exec`
-  if (/\b(?:eval|exec)\s+[^\s]/i.test(command) && !/\b(?:pnpm|npm|yarn|bun|bundle|docker(?:\s+compose)?)\s+exec\b/i.test(command)) {
+  if (/(?<!-)\b(?:eval|exec)\s+[^\s]/i.test(command) && !/\b(?:pnpm|npm|yarn|bun|bundle|docker(?:\s+compose)?)\s+exec\b/i.test(command)) {
     reasons.push('Dynamic shell eval/exec detected.');
   }
 

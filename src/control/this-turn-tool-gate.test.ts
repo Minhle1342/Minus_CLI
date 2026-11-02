@@ -139,7 +139,7 @@ test('phase-specific exploration anchors stay visible after dynamic retrieval', 
   } as any, tools).phaseExploreToolAnchors;
 
   // By default (no .codegraph/ index and not an architecture query), CodeGraph anchors are filtered out to save tokens
-  assert.deepEqual(decideDefault('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'get_symbol_context_360', 'get_diagnostics']);
+  assert.deepEqual(decideDefault('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'get_symbol_context_360', 'get_diagnostics', 'run_command']);
   assert.deepEqual(decideDefault('plan'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology']);
   assert.deepEqual(decideDefault('implement'), ['read_file', 'get_symbol_context_360', 'get_diagnostics']);
   assert.deepEqual(decideDefault('verify'), ['read_file', 'get_diagnostics', 'run_command']);
@@ -155,7 +155,7 @@ test('phase-specific exploration anchors stay visible after dynamic retrieval', 
     reversibility: 'reversible',
   } as any, tools, { hasCodeGraph: true }).phaseExploreToolAnchors;
 
-  assert.deepEqual(decideWithCodeGraph('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics']);
+  assert.deepEqual(decideWithCodeGraph('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics', 'run_command']);
   assert.deepEqual(decideWithCodeGraph('plan'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'codegraph_explore', 'codegraph_impact', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology']);
 
   const decideWithArchQuery = (phase: string) => gate.decide({
@@ -168,7 +168,7 @@ test('phase-specific exploration anchors stay visible after dynamic retrieval', 
     reversibility: 'reversible',
   } as any, tools, { userRequest: 'Explain the architecture and call graph' }).phaseExploreToolAnchors;
 
-  assert.deepEqual(decideWithArchQuery('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics']);
+  assert.deepEqual(decideWithArchQuery('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics', 'run_command']);
 
   const decision = gate.decide({
     id: 'class-anchor-surface',

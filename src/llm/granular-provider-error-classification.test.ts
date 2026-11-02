@@ -123,7 +123,7 @@ describe('Granular Provider Error Classification & Emergency Compaction', () => 
       let callCount = 0;
       const mockLLM = {
         modelName: 'mock-llm',
-        getTokenConfig: () => ({ maxInputTokens: 10000 }),
+        getTokenConfig: () => ({ maxInputTokens: 32768 }),
         generateStream: async (session: Session) => {
           callCount++;
           if (callCount === 1) {

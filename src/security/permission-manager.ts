@@ -7,8 +7,9 @@ import { CLI } from '../ui/cli-ui.js';
 import { ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
 import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
 import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
+import { isGateOpen } from './full-access-gates.js';
 
-export type PermissionMode = 'always_ask' | 'ask_sensitive' | 'auto_approve' | 'read_only';
+export type PermissionMode = 'always_ask' | 'ask_sensitive' | 'auto_approve' | 'read_only' | 'full_access';
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
@@ -253,13 +254,15 @@ export class PermissionManager {
             reason: 'OPERATION BLOCKED (User Rule 2): Never automatically git push to main/master.',
           };
         }
-        const pe = new SandboxPolicyEngine(this.workspaceRoot || process.cwd(), 'workspace-write').evaluateCommand(cmd);
-        if (!pe.allowed && pe.riskLevel === 'SYSTEM_RISK') {
-          return {
-            allowed: false,
-            errorCode: 'SECURITY_VIOLATION',
-            reason: pe.reason || 'System-destructive command blocked by security policy.',
-          };
+        if (!isGateOpen('host_system_risk', mode)) {
+          const pe = new SandboxPolicyEngine(this.workspaceRoot || process.cwd(), 'workspace-write').evaluateCommand(cmd);
+          if (!pe.allowed && pe.riskLevel === 'SYSTEM_RISK') {
+            return {
+              allowed: false,
+              errorCode: 'SECURITY_VIOLATION',
+              reason: pe.reason || 'System-destructive command blocked by security policy.',
+            };
+          }
         }
       }
       return {
@@ -280,6 +283,16 @@ export class PermissionManager {
       } catch {
         request.diff = undefined;
       }
+    }
+
+    // Gate 1 (approval_prompt): full access là user đã giao cả project, không còn thẻ hỏi.
+    // Bốn gate §6 không nằm ở đây: push-to-main chặn ở run-command/subagent branch,
+    // redaction/hooks/git-policy thuộc tầng thực thi lệnh.
+    if (isGateOpen('approval_prompt', mode)) {
+      if (request.diff && ['file_edit', 'file_write', 'destructive'].includes(request.category)) {
+        CLI.renderSessionAutoApprovedDiff(request);
+      }
+      return { allowed: true, permissionGranted: toolName === 'run_command', permissionRequestId: request.id };
     }
 
     // 1. Chế độ Auto-Approve (Tự động duyệt tất cả nhưng vẫn in Diff View nếu là tool sửa file)

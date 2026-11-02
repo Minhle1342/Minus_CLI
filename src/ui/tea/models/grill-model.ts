@@ -31,7 +31,7 @@ export function grillKey(msg: KeyMsg, model: RootModel): [RootModel, Cmd[]] | un
       const nextVal = val.slice(0, Math.max(0, val.length - 1));
       return [{ ...model, grill: { ...grill, customInput: { active: true, value: nextVal, cursor: nextVal.length } } }, []];
     }
-    if (msg.text && !msg.ctrl) {
+    if (msg.text) {
       const val = (grill.customInput.value || '') + msg.text;
       return [{ ...model, grill: { ...grill, customInput: { active: true, value: val, cursor: val.length } } }, []];
     }

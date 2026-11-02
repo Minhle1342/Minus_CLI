@@ -9,6 +9,7 @@ import { replaceTextTool } from './replace-text.js';
 import { calculateComprehensiveBlastRadius } from './mutation-blast-radius.js';
 import { replaceFileContentTool } from './replace-file-content.js';
 import { multiReplaceFileContentTool } from './multi-replace-file-content.js';
+import { writeToFileTool } from './write-to-file.js';
 import { createSearchCodebaseFastTool } from './search-code-tool.js';
 
 describe('Tools Enhancement Suite (fast-glob, json5, diff, ts-morph)', () => {
@@ -135,5 +136,39 @@ describe('Tools Enhancement Suite (fast-glob, json5, diff, ts-morph)', () => {
     assert.ok(Array.isArray(res.hits));
     assert.equal(res.hits.length, 1);
     assert.equal(res.hits[0].path, 'src/tools/types.ts');
+  });
+
+  it('8. write_to_file maps Overwrite/allowOverwrite onto write_file overwrite gate', async () => {
+    const scratchDir = path.resolve(process.cwd(), '.codingagent', 'scratch');
+    await fs.mkdir(scratchDir, { recursive: true });
+    const tempFile = path.resolve(scratchDir, `test-overwrite-${Date.now()}.txt`);
+    const relFile = path.relative(process.cwd(), tempFile).replace(/\\/g, '/');
+
+    try {
+      await fs.writeFile(tempFile, 'original\n', 'utf-8');
+
+      const refused = await writeToFileTool.execute(
+        { TargetFile: relFile, CodeContent: 'replaced\n', Overwrite: false },
+        workspace,
+      );
+      assert.equal(refused.success, false, 'Overwrite=false must refuse to clobber an existing file');
+      assert.equal(refused.errorCode, 'FILE_ALREADY_EXISTS');
+      assert.equal(await fs.readFile(tempFile, 'utf-8'), 'original\n', 'file must stay untouched after refusal');
+
+      const allowed = await writeToFileTool.execute(
+        { TargetFile: relFile, CodeContent: 'replaced\n', Overwrite: true },
+        workspace,
+      );
+      assert.equal(allowed.success, true, 'Overwrite=true must overwrite');
+      assert.equal(await fs.readFile(tempFile, 'utf-8'), 'replaced\n');
+
+      const nativeRefused = await writeToFileTool.execute(
+        { path: relFile, content: 'x\n', overwrite: false },
+        workspace,
+      );
+      assert.equal(nativeRefused.success, false, 'native overwrite=false must pass through the alias too');
+    } finally {
+      await fs.rm(tempFile, { force: true });
+    }
   });
 });

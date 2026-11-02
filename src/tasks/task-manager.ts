@@ -2,6 +2,7 @@ import { spawn, ChildProcess, execFile } from 'node:child_process';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText } from '../security/env-scrub.js';
+import type { GateReader } from '../security/full-access-gates.js';
 import type { AgentInbox } from '../agent/agent-inbox.js';
 
 const execFileAsync = promisify(execFile);
@@ -17,6 +18,8 @@ export interface BackgroundTaskOptions {
   turn?: number;
   autoPromoted?: boolean;
   inbox?: Pick<AgentInbox, 'enqueue'>;
+  /** Gate full access (gate 7) do caller truyền xuống; thiếu ⇒ env con vẫn scrub. */
+  gates?: GateReader;
 }
 
 export interface BackgroundTask {
@@ -106,7 +109,7 @@ export class TaskManager {
     // Khởi chạy child process với shell và env đã scrub (không leak host secrets)
     const child = spawn(command, [], {
       cwd: effectiveCwd,
-      env: buildSafeChildEnv(env),
+      env: buildSafeChildEnv(env, options?.gates),
       shell: true,
       // POSIX process groups make whole-tree termination possible. Windows
       // uses taskkill /T against the exact shell PID instead.

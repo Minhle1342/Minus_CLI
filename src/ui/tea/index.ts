@@ -8,7 +8,7 @@ import { KernelTEAAdapter } from './kernel-bridge.js';
 import { openExternalEditor } from './external-editor.js';
 import { stripTerminalControls } from './styles/theme.js';
 import { currentSubagentOutputSessionId } from '../../agent/subagent-output-context.js';
-import type { Cmd, Completion, GrillOption, Mode, ModelPickerOption, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard, SwitchWorkspaceOptions } from './types.js';
+import type { Cmd, Completion, GrillOption, Mode, ModelPickerOption, PaletteItem, SidebarModel, TranscriptEntry, PermissionCard, PermissionChoice, PermissionStateSnapshot, SwitchWorkspaceOptions } from './types.js';
 export { parseTeaCommandLine } from './cli-options.js';
 export { Table, renderTable, formatSubmitSolutionTable, formatMarkdownTablesWithTea } from './styles/table.js';
 export type { SwitchWorkspaceOptions };
@@ -30,6 +30,7 @@ export class TeaTerminal extends EventEmitter {
   private questionResolver?: (text: string | undefined) => void;
   private grillResolver?: (text: string | undefined) => void;
   private modelPickerResolver?: (value: { id: string; name: string } | undefined) => void;
+  private permissionResolver?: (choice: PermissionChoice | undefined) => void;
   private queued: string[] = [];
   private restoreOutput?: () => void;
   constructor(private readonly kernel: TeaKernel, private readonly options: InteractiveOptions) {
@@ -127,6 +128,21 @@ export class TeaTerminal extends EventEmitter {
     return new Promise((resolve) => { this.modelPickerResolver = resolve; });
   }
   dismissModelPicker(): void { this.resolveModelPicker(undefined); }
+  /** Mở permission modal (menu hai tầng); resolve với choice được chọn hoặc undefined khi hủy. */
+  permissionChoose(state: PermissionStateSnapshot, sessionId?: string): Promise<PermissionChoice | undefined> {
+    if (this.closed) return Promise.resolve(undefined);
+    if (this.permissionResolver) throw new Error('A permission modal is already active');
+    this.program.send({ type: 'permission', open: true, state, sessionId });
+    return new Promise((resolve) => { this.permissionResolver = resolve; });
+  }
+  dismissPermission(): void { this.resolvePermission(undefined); }
+  private resolvePermission(value: PermissionChoice | undefined): void {
+    const resolve = this.permissionResolver; this.permissionResolver = undefined;
+    if (resolve) {
+      this.program.send({ type: 'permission', open: false });
+      resolve(value);
+    }
+  }
   private resolveModelPicker(value: { id: string; name: string } | undefined): void {
     const resolve = this.modelPickerResolver; this.modelPickerResolver = undefined;
     if (resolve) {
@@ -177,6 +193,8 @@ export class TeaTerminal extends EventEmitter {
       case 'grill-cancel': this.resolveGrill(undefined); break;
       case 'model-pick': this.resolveModelPicker({ id: cmd.id, name: cmd.name }); break;
       case 'model-cancel': this.resolveModelPicker(undefined); break;
+      case 'permission-pick': this.resolvePermission(cmd.choice); break;
+      case 'permission-cancel': this.resolvePermission(undefined); break;
       case 'session-switch': this.submit(`/sessions open ${cmd.sessionId}`); break;
       // Đồng bộ với /new-session: kernel tạo đúng id optimistic + episodic epilogue.
       case 'session-new': this.submit(cmd.sessionId ? `/new-session ${cmd.sessionId}` : '/new-session'); break;
@@ -205,7 +223,7 @@ export class TeaTerminal extends EventEmitter {
   }
   close(): void {
     if (this.closed) return;
-    this.closed = true; this.answer(undefined); this.resolveGrill(undefined); this.resolveModelPicker(undefined);
+    this.closed = true; this.answer(undefined); this.resolveGrill(undefined); this.resolveModelPicker(undefined); this.resolvePermission(undefined);
     this.restoreOutput?.(); this.restoreOutput = undefined;
     this.program.stop();
     this.pending?.('/exit'); this.pending = undefined; this.queued = []; this.emit('close');

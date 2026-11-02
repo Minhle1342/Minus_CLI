@@ -7,6 +7,7 @@ import {
   mustBlockUnisolatedAutoExecution,
   requiresIsolatedExecution,
 } from './command-isolation-policy.js';
+import { gatesForMode } from '../security/full-access-gates.js';
 
 test('read-only and test/build/lint/typecheck commands may use an automatic local fallback', () => {
   assert.equal(requiresIsolatedExecution('rg "SandboxManager" src'), false);
@@ -38,6 +39,8 @@ test('Docker-to-local fallback is fail-closed only for commands requiring isolat
     dockerAvailable: false,
     fallbackToLocal: true,
   };
+  delete process.env.MINUS_ALLOW_HOST_FALLBACK;
+  delete process.env.MINUS_DISABLE_DOCKER_ISOLATION;
   assert.equal(mustBlockUnisolatedAutoExecution('npm install malicious-pkg', fallbackStatus), true);
   assert.equal(mustBlockUnisolatedAutoExecution('npm test', fallbackStatus), false);
   assert.equal(mustBlockUnisolatedAutoExecution('npm run build', fallbackStatus), false);
@@ -81,4 +84,21 @@ test('Docker mount remains writable by default and read-only only when configure
   const common = { containerName: 'minus-test', workspacePath: 'C:\\repo', memoryLimitMb: 512, cpuLimit: 1, image: 'node:20-alpine' };
   assert.ok(buildDockerRunArgs({ ...common, workspaceMountMode: 'rw' }).includes('C:/repo:/workspace:rw'));
   assert.ok(buildDockerRunArgs({ ...common, workspaceMountMode: 'ro' }).includes('C:/repo:/workspace:ro'));
+});
+
+test('full access opens gates 2 and 4; call sites without a reader keep the old behavior', () => {
+  delete process.env.MINUS_ALLOW_HOST_FALLBACK;
+  const fallbackStatus = {
+    mode: 'local' as const,
+    activeProvider: 'Local Process Sandbox',
+    isIsolated: false,
+    dockerAvailable: false,
+    fallbackToLocal: true,
+  };
+  const open = gatesForMode('full_access');
+  assert.equal(mustBlockUnisolatedAutoExecution('npm install malicious-pkg', fallbackStatus, open), false);
+  assert.equal(evaluateHostCommandPolicy('format C:', undefined, open).allowed, true);
+  // Không truyền reader ⇒ mặc định đóng, y hệt hành vi trước khi có full_access.
+  assert.equal(mustBlockUnisolatedAutoExecution('npm install malicious-pkg', fallbackStatus), true);
+  assert.equal(evaluateHostCommandPolicy('format C:').allowed, false);
 });

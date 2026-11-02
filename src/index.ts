@@ -22,7 +22,10 @@ import { Session } from './session/session.js';
 import { SessionPersistence } from './session/session-persistence.js';
 import { SessionNames, shortSessionName } from './session/session-names.js';
 import { loadSession, saveSession, getSessionFilePath } from './session/persistent-session.js';
-import { Workspace } from './workspace/workspace.js';
+import { isPermissionMode } from './security/permission-modes.js';
+import { gatesFromPermissionManager, gateReport } from './security/full-access-gates.js';
+import type { PermissionMode } from './security/permission-manager.js';
+import { setDefaultWorkspaceGates, Workspace } from './workspace/workspace.js';
 import {
   CLI,
   AVAILABLE_MODELS,
@@ -619,6 +622,9 @@ async function main() {
   }).catch(() => {});
 
   const kernel = new AgentKernel(workspace, llm);
+  // Gate 3/6 đọc live từ PermissionManager hiện hành — gắn một lần cho mọi Workspace,
+  // kể cả instance dựng sau đó cho worktree subagent và spec branch.
+  setDefaultWorkspaceGates(gatesFromPermissionManager(kernel.ctx.permissions));
   await kernel.use(WorkspacePlugin);
   await kernel.use(PlanningPlugin);
   await kernel.use(MemoryPlugin);
@@ -650,15 +656,18 @@ async function main() {
   // on startup and every workspace switch (opencode-style auto-accept).
   const hydrateProjectPermission = (rootDir: string): void => {
     const override = loadSession(rootDir).permissionMode;
-    kernel.ctx.permissions.setProjectMode(rootDir,
-      override === 'always_ask' || override === 'ask_sensitive' || override === 'auto_approve' || override === 'read_only'
-        ? override : null);
+    kernel.ctx.permissions.setProjectMode(rootDir, isPermissionMode(override) ? override : null);
+  };
+  // Badge FULL ACCESS luôn phản ánh effectiveMode() (planLock vẫn thắng ⇒ tắt badge khi vào PLAN).
+  const syncFullAccessBadge = (): void => {
+    tui?.program.send({ type: 'full-access', on: kernel.ctx.permissions.effectiveMode() === 'full_access' });
   };
   hydrateProjectPermission(workspace.rootDir);
 
   // Lắng nghe sự kiện thay đổi workspace hoặc model từ Kernel để tự động đồng bộ xuống đĩa
   kernel.ctx.events.on('workspace:changed', (_oldPath: string, newPath: string) => {
     hydrateProjectPermission(newPath);
+    syncFullAccessBadge();
     saveSession({ workspacePath: newPath }, workspace.rootDir);
     saveSession({ workspacePath: newPath });
   });
@@ -854,6 +863,7 @@ Please focus on executing and verifying this task. Report it complete only after
     } else {
       kernel.ctx.permissions.setMode(implementPermissionMode);
     }
+    syncFullAccessBadge();
   };
   const nameFirstTask = async (request: string): Promise<void> => {
     const session = activeSession;
@@ -980,6 +990,7 @@ Please focus on executing and verifying this task. Report it complete only after
       }
     },
   });
+  syncFullAccessBadge();
   const rl = tui;
   tui.on('line', (line: string) => {
     if (!activeExecutionController || isPromptingPermission) return;
@@ -2843,39 +2854,85 @@ Please focus on executing and verifying this task, and report it complete only a
       if (trimmed === '/permissions' || trimmed.startsWith('/permissions ') || trimmed === '/permission' || trimmed.startsWith('/permission ')) {
         const parts = trimmed.split(/\s+/).slice(1);
         const sub = parts[0]?.toLowerCase();
-        if (sub === 'reset') {
+        const rootDir = workspace.rootDir;
+        const confirmFullAccess = async (): Promise<boolean> => {
+          console.log(`\n${c.yellow}⚠ FULL ACCESS${c.reset}${c.dim} mở: approval prompt, system-risk lệnh host, giới hạn workspace, Docker isolation, phase masking, file bảo vệ, env con.${c.reset}`);
+          console.log(`${c.dim}Không bao giờ mở: git push main/master, redaction secrets, deny rule .minus/hooks.json, git policy.${c.reset}\n`);
+          const answer = tui ? await tui.ask('Gõ lại đúng "full_access" để xác nhận (Enter để hủy): ') : '';
+          if (String(answer).trim() !== 'full_access') {
+            console.log(`\n${c.red}✖ Hủy: không đổi permission mode.${c.reset}\n`);
+            return false;
+          }
+          return true;
+        };
+        const applyGlobalMode = async (mode: PermissionMode): Promise<void> => {
+          if (mode === 'full_access' && !await confirmFullAccess()) return;
+          if (isPlanModeActive) {
+            implementPermissionMode = mode;
+            kernel.ctx.permissions.setMode('read_only');
+            console.log(`\n${c.green}✔ Saved implement mode: ${c.bold}${mode}${c.reset} ${c.dim}(PLAN stays read-only; applies on exit)${c.reset}\n`);
+            return;
+          }
+          kernel.ctx.permissions.setMode(mode);
+          syncFullAccessBadge();
+          const projectOverride = kernel.ctx.permissions.getProjectMode(rootDir);
+          console.log(`\n${c.green}✔ Switched permission mode to: ${c.bold}${mode}${c.reset}${projectOverride ? ` ${c.dim}(project override ${projectOverride} still applies here)` : ''}\n`);
+          if (mode === 'full_access') console.log(`${c.dim}${gateReport(mode)}${c.reset}\n`);
+        };
+        const applyProjectMode = async (mode: PermissionMode | null): Promise<void> => {
+          if (mode === 'full_access' && !await confirmFullAccess()) return;
+          kernel.ctx.permissions.setProjectMode(rootDir, mode);
+          saveSession({ permissionMode: mode ?? undefined }, rootDir);
+          syncFullAccessBadge();
+          console.log(mode
+            ? `\n${c.green}✔ Project override for:${c.reset} ${c.bold}${rootDir}${c.reset} ${c.green}→${c.reset} ${c.bold}${mode}${c.reset}\n`
+            : `\n${c.green}✔ Cleared project override for:${c.reset} ${c.bold}${rootDir}${c.reset}\n`);
+          if (mode === 'full_access') console.log(`${c.dim}${gateReport(mode)}${c.reset}\n`);
+        };
+        const resetApprovals = (): void => {
           kernel.ctx.permissions.clearSessionApprovals();
           console.log(`\n${c.green}✔ Reset all auto-approved categories in this session.${c.reset}\n`);
+        };
+        if (sub === 'reset') {
+          resetApprovals();
         } else if (sub === 'project') {
           const projectSub = parts[1]?.toLowerCase();
-          const rootDir = workspace.rootDir;
           if (!projectSub || projectSub === 'status') {
             const override = kernel.ctx.permissions.getProjectMode(rootDir);
             console.log(`\n${c.bold}Project permission override:${c.reset} ${override ?? `${c.dim}(none — global mode applies)`}`);
             console.log(`${c.dim}Global mode: ${kernel.ctx.permissions.getMode()} · Effective here: ${kernel.ctx.permissions.effectiveMode()}${c.reset}\n`);
           } else if (projectSub === 'clear') {
-            kernel.ctx.permissions.setProjectMode(rootDir, null);
-            saveSession({ permissionMode: undefined }, rootDir);
-            console.log(`\n${c.green}✔ Cleared project override for:${c.reset} ${c.bold}${rootDir}${c.reset}\n`);
-          } else if (['always_ask', 'ask_sensitive', 'auto_approve', 'read_only'].includes(projectSub)) {
-            kernel.ctx.permissions.setProjectMode(rootDir, projectSub as any);
-            saveSession({ permissionMode: projectSub as any }, rootDir);
-            console.log(`\n${c.green}✔ Project override for:${c.reset} ${c.bold}${rootDir}${c.reset} ${c.green}→${c.reset} ${c.bold}${projectSub}${c.reset}\n`);
+            await applyProjectMode(null);
+          } else if (isPermissionMode(projectSub)) {
+            await applyProjectMode(projectSub);
           } else {
             console.log(`\n${c.red}✖ Usage:${c.reset} ${c.bold}/permissions project [mode|clear|status]${c.reset}\n`);
           }
-        } else if (['always_ask', 'ask_sensitive', 'auto_approve', 'read_only'].includes(sub)) {
-          if (isPlanModeActive) {
-            implementPermissionMode = sub as any;
-            kernel.ctx.permissions.setMode('read_only');
-            console.log(`\n${c.green}✔ Saved implement mode: ${c.bold}${sub}${c.reset} ${c.dim}(PLAN stays read-only; applies on exit)${c.reset}\n`);
-          } else {
-            kernel.ctx.permissions.setMode(sub as any);
-            const projectOverride = kernel.ctx.permissions.getProjectMode(workspace.rootDir);
-            console.log(`\n${c.green}✔ Switched permission mode to: ${c.bold}${sub}${c.reset}${projectOverride ? ` ${c.dim}(project override ${projectOverride} still applies here)` : ''}\n`);
+        } else if (isPermissionMode(sub)) {
+          await applyGlobalMode(sub);
+        } else if (!sub && tui) {
+          // Không có tham số: mở permission modal hai tầng; typed path ở trên vẫn chạy nguyên văn.
+          const choice = await tui.permissionChoose({
+            globalMode: kernel.ctx.permissions.getMode(),
+            projectMode: kernel.ctx.permissions.getProjectMode(rootDir) ?? null,
+            effectiveMode: kernel.ctx.permissions.effectiveMode(),
+            planModeActive: isPlanModeActive,
+            approvalCount: (kernel.ctx.permissions as any).sessionApprovedCategories?.size || 0,
+          }, activeSession.id);
+          if (!choice) {
+            tui.program.send({ type: 'notice', text: 'Đã hủy đổi quyền.' });
+          } else if (choice.action === 'reset-approvals') {
+            resetApprovals();
+          } else if (choice.action === 'clear-project') {
+            await applyProjectMode(null);
+          } else if (choice.action === 'set-project' && choice.mode) {
+            await applyProjectMode(choice.mode);
+          } else if (choice.action === 'set-global' && choice.mode) {
+            await applyGlobalMode(choice.mode);
           }
         } else {
           CLI.renderPermissionStatus(kernel.ctx.permissions.getMode(), (kernel.ctx.permissions as any).sessionApprovedCategories?.size || 0);
+          console.log(`${c.dim}${gateReport(kernel.ctx.permissions.effectiveMode())}${c.reset}\n`);
         }
         continue;
       }

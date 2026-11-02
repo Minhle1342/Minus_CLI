@@ -1,3 +1,8 @@
+const ENGLISH_STOP_WORDS = new Set([
+  'the', 'a', 'an', 'and', 'or', 'of', 'to', 'in', 'on', 'at', 'by', 'for', 'with', 'about', 'against',
+  'is', 'it', 'as', 'from', 'that', 'this', 'these', 'those', 'are', 'was', 'were', 'be', 'been', 'being',
+]);
+
 import type { ToolDefinition } from './types.js';
 import { batchSubwordSimilarity } from '../native/semantic-batch.js';
 
@@ -127,7 +132,7 @@ export class LocalCrossEncoderReranker {
         .toLowerCase()
         .split(/[^a-z0-9_]+/g)
         .map((t) => t.trim())
-        .filter((t) => t.length >= 2),
+        .filter((t) => t.length >= 2 && !ENGLISH_STOP_WORDS.has(t)),
     );
   }
 

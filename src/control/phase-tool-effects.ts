@@ -1,7 +1,10 @@
+import path from 'node:path';
+import fs from 'node:fs';
 import type { ToolDefinition } from '../tools/types.js';
 import { ToolDescriptorRegistry } from './tool-descriptor-registry.js';
 import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
+import { parseShellAst } from '../security/shell-ast-parser.js';
 
 /**
  * Delegation/control tools spawn child agents; they never touch the workspace.
@@ -27,6 +30,30 @@ export const ORCHESTRATION_SPAWN_TOOL_NAMES = new Set([
   'brainstorm_design',
 ]);
 
+function isReadingWorkspaceCodebase(command: string, workspaceRoot: string): boolean {
+  const analysis = parseShellAst(command.trim());
+  const FILE_READERS = new Set(['cat', 'type', 'get-content', 'gc', 'head', 'tail', 'more', 'less', 'sed']);
+  for (const cmd of analysis.commands) {
+    const executable = cmd.executable.toLowerCase();
+    if (FILE_READERS.has(executable)) {
+      for (const arg of cmd.args) {
+        if (arg.startsWith('-') || /^\d+$/.test(arg)) continue;
+        if (['/dev/null', 'nul', 'con', '/dev/stdout', '/dev/stderr'].includes(arg.toLowerCase())) continue;
+        try {
+          const resolved = path.resolve(workspaceRoot, arg);
+          const wsResolved = path.resolve(workspaceRoot);
+          if (resolved.startsWith(wsResolved) && fs.existsSync(resolved) && fs.statSync(resolved).isFile()) {
+            return true;
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+  return false;
+}
+
 /** Enforce argument-dependent effects on both early and ordinary dispatch paths. */
 export function checkPhaseToolEffect(
   tool: ToolDefinition,
@@ -38,6 +65,12 @@ export function checkPhaseToolEffect(
   if (isOrchestrationTool(tool.name)) return { allowed: true };
   if (tool.name === 'run_command') {
     const command = String(args.command || args.CommandLine || args.commandLine || args.cmd || args.rawCommand || args.script || '');
+    if (isReadingWorkspaceCodebase(command, workspaceRoot)) {
+      return {
+        allowed: false,
+        reason: 'Reading workspace codebase files through shell is not allowed in explore/plan phase; use dedicated read_file tool instead.',
+      };
+    }
     const result = new SandboxPolicyEngine(workspaceRoot, 'strict').evaluateCommand(command, args.cwd);
     return result.allowed ? { allowed: true } : { allowed: false, reason: result.reason || 'Only inspected read-only command effects are allowed before implementation.' };
   }

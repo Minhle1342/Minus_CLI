@@ -14,6 +14,7 @@ import { createManageTaskTool } from './manage-task.js';
 import { searchWebTool, webSearchTool } from './web-search.js';
 import { readUrlContentTool, webFetchTool } from './web-fetch.js';
 import { createFileTool } from './create-file.js';
+import { deleteFileTool } from './delete-file.js';
 import { searchCodebaseFastTool } from './search-code-tool.js';
 import { ToolRetriever, ToolRetrieverConfig, ToolRetrievalQueryInput, ToolCompactStub } from './tool-retriever.js';
 import { isOrchestrationTool } from '../control/phase-tool-effects.js';
@@ -40,6 +41,7 @@ export const CANONICAL_MODEL_TOOL_NAMES = new Set([
   'run_command',
   'web_search',
   'web_fetch',
+  'delete_file',
 ]);
 
 /**
@@ -113,6 +115,7 @@ export class ToolRegistry implements ToolProvider {
     this.register(runCommandTool);
     this.register(webSearchTool);
     this.register(webFetchTool);
+    this.register(deleteFileTool);
 
     // Register compatibility aliases (hidden from model declarations)
     this.register(searchWebTool);

@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry, SessionTab, SessionTabsModel } from '../types.js';
 import { createComposer, updateComposer, composerView, composerDisplay } from './composer-model.js';
-import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerArchiveThinking, ownerClearStream, ownerFlushLiveAnswer, thoughtToggleHit, toggleThought, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle, switchToTab } from './viewport-model.js';
+import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerNoteThinkingStart, ownerArchiveThinking, ownerClearStream, ownerFlushLiveAnswer, thoughtToggleHit, toggleThought, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle, switchToTab } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
 import { diffView, createDiffViewer, visibleDiffLines } from './diff-model.js';
@@ -11,6 +11,7 @@ import { toolCallEntry, toolErrorEntry, toolResultEntry, mergedToolEntry } from 
 import { selectionKey, selectionRows, type SelectionLayout } from './selection.js';
 import { createGrillModel, grillKey, grillView } from './grill-model.js';
 import { createModelPickerModel, modelPickerKey, modelPickerLayout } from './model-picker-model.js';
+import { createPermissionModel, permissionKey, permissionView } from './permission-model.js';
 import { createSubagentsModal, subagentsModalKey, subagentsModalView } from './subagent-modal.js';
 import { fit, wrap, joinHorizontal, joinVertical, paintCanvas, color, tokyoNight } from '../styles/theme.js';
 
@@ -41,6 +42,7 @@ export function createRootModel(options: { width?: number; height?: number; comm
     file: createFileView(),
     grill: createGrillModel(),
     modelPicker: createModelPickerModel(),
+    permission: createPermissionModel(),
     sessions: createSessionTabs('', []),
     subagents: createSubagentsModal(),
     status: { busy: false, aborting: false, step: 0, maxSteps: Infinity, phase: '', retry: '', notice: '', compaction: null, frame: 0 }, question: { active: false, prompt: '', selected: 0 } };
@@ -316,6 +318,13 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       const current = Math.max(0, options.findIndex((o) => o.current));
       return [{ ...model, focus: 'model-picker' as const, palette: { ...model.palette, open: false }, modelPicker: { open: true, options, selected: current, query: '', sessionId: msg.sessionId ?? model.sessions.activeId } }, []];
     }
+    case 'permission': {
+      if (!msg.open) return [{ ...model, focus: model.focus === 'permission' ? 'composer' : model.focus, permission: { ...model.permission, open: false, tier: 'actions' as const, selected: 0 } }, []];
+      // Snapshot quyền mới nhất thắng; thiếu state thì giữ số liệu đang xem.
+      return [{ ...model, focus: 'permission' as const, palette: { ...model.palette, open: false }, permission: { ...model.permission, ...msg.state, open: true, tier: 'actions' as const, selected: 0, sessionId: msg.sessionId ?? model.sessions.activeId } }, []];
+    }
+    case 'full-access':
+      return [{ ...model, fullAccess: msg.on }, []];
     case 'sessions': {
       if (msg.tabs || msg.activeId) {
         const ids = msg.tabs ? msg.tabs.map(t => t.id) : model.sidebar.sessions;
@@ -373,8 +382,8 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
           const cleared = ownerClearStream(next, 'answerStream', explicitOwner);
           return [{ ...cleared, status: { ...cleared.status, retry: ownerActive ? '' : cleared.status.retry } }, []];
         }
-        case 'model:thinking:start': return [{ ...ownerArchiveThinking(model, explicitOwner), status: { ...model.status, phase: ownerActive ? 'Thinking' : model.status.phase } }, []];
-        case 'model:thinking:end': return [ownerArchiveThinking(model, explicitOwner), []];
+        case 'model:thinking:start': return [{ ...ownerNoteThinkingStart(ownerArchiveThinking(model, explicitOwner), msg.args[0]?.startedAt, explicitOwner), status: { ...model.status, phase: ownerActive ? 'Thinking' : model.status.phase } }, []];
+        case 'model:thinking:end': return [ownerArchiveThinking(model, explicitOwner, msg.args[0]?.endedAt), []];
         case 'step:before': return [{ ...ownerArchiveThinking(model, explicitOwner), status: { ...model.status, step: ownerActive ? msg.args[0] : model.status.step, maxSteps: ownerActive ? msg.args[1] : model.status.maxSteps, phase: ownerActive ? msg.args[2] || 'Working' : model.status.phase } }, []];
         case 'step:after': return [model, []];
         case 'tool:before': {
@@ -490,7 +499,7 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         if (hit) return sessionStripClick(model, hit);
         return [model, []];
       }
-      // Click chuột lên dấu +/− trước dòng "Thinking ›" → mở/tắt khối Thinking.
+      // Click chuột lên dấu ▸/▾ trước dòng "thinking" → mở/tắt khối Thinking.
       // Phải xử lý TRƯỚC selection để click nút không bị hiểu là bôi chữ.
       if (msg.key === 'mouse+press' && msg.mouse && model.height > 4
         && !model.grill.open && model.focus !== 'grill' && !model.question.active) {
@@ -571,6 +580,12 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
       // Model-picker modal đè lên viewport (sau sessions): ↑↓ + Enter hoặc click chuột để chọn model.
       if (model.modelPicker.open || model.focus === 'model-picker') {
         const handled = modelPickerKey(msg, { ...model, focus: 'model-picker' as const });
+        if (handled) return handled;
+        return [model, []];
+      }
+      // Permission modal đè lên viewport (sau model-picker): menu hai tầng — chọn scope rồi chọn mode.
+      if (model.permission.open || model.focus === 'permission') {
+        const handled = permissionKey(msg, { ...model, focus: 'permission' as const });
         if (handled) return handled;
         return [model, []];
       }
@@ -836,6 +851,16 @@ export function view(model: RootModel): string {
   // Model-picker modal: đè lên giữa màn hình, ngay trên viewport để chọn model.
   if (model.modelPicker.open) {
     const { panel, startRow } = modelPickerLayout(model.modelPicker, width, height);
+    rows = rows.map((row, i) => {
+      const p = i - startRow;
+      if (p < 0 || p >= panel.length) return row;
+      return panel[p];
+    });
+  }
+  // Permission modal: đè lên giữa màn hình, trên model-picker để chốt quyền không bị lẫn chọn model.
+  if (model.permission.open) {
+    const panel = permissionView(model.permission, width, height);
+    const startRow = Math.max(1, Math.floor((height - panel.length) / 2));
     rows = rows.map((row, i) => {
       const p = i - startRow;
       if (p < 0 || p >= panel.length) return row;

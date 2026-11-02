@@ -238,7 +238,7 @@ describe('AgentLoop Bug Fixes Verification', () => {
       class ToolTrackingLLM {
         calls = 0;
         modelName = 'test-model';
-        getTokenConfig() { return { maxInputTokens: 8192, maxOutputTokens: 2048 }; }
+        getTokenConfig() { return { maxInputTokens: 16384, maxOutputTokens: 2048 }; }
         async generateStream(_session: Session, tools: any[]): Promise<any> {
           toolSnapshots.push(JSON.stringify(tools));
           if (this.calls === 0) {

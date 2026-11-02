@@ -11,14 +11,17 @@ import {
   invalidateTopologyCache,
 } from './mutation-blast-radius.js';
 
-type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation' | 'normalized_unicode' | 'normalized_whitespace' | 'empty_file_initialization';
+type MatchStrategy = 'exact' | 'normalized_eol' | 'normalized_indentation' | 'normalized_unicode' | 'normalized_whitespace' | 'normalized_line_numbers' | 'empty_file_initialization';
 
 export interface TextMatch {
   start: number;
   end: number;
   line: number;
   strategy: MatchStrategy;
+  /** Strategy that actually matched after line-number prefixes were stripped. */
+  baseStrategy?: MatchStrategy;
   indentation?: string;
+  lineNumbersStripped?: boolean;
 }
 
 interface NormalizedText {
@@ -34,7 +37,7 @@ interface NormalizedText {
  */
 export const replaceTextTool: ToolDefinition = {
   name: 'replace_text',
-  description: 'Replace one oldText block in a file. Auto mode safely handles LF/CRLF, Unicode (NFC/NFD), and indentation differences in multi-line blocks without fuzzy semantic matching. Prefer a concise, unique 3–15-line anchor copied from the current file contents; avoid sending blocks larger than 50 lines. Pass the latest contentHash from read_file as expectedFileHash. If the tool returns FILE_CONTENT_CHANGED, do not retry with the old text or merely swap in the returned hash: re-read the current file, review its changes, rebuild oldText/newText against that version, and retry with its new contentHash. Do not omit the hash to bypass a conflict.',
+  description: 'Replace one oldText block in a file. Auto mode safely handles LF/CRLF, Unicode (NFC/NFD), indentation, and read_file line-number prefixes in multi-line blocks without fuzzy semantic matching: read_file "N: " line-number prefixes are auto-stripped when every non-empty line is numbered and the numbers align, while misaligned numbering fails with cause LINE_NUMBER_PREFIX. Prefer a concise, unique 3–15-line anchor copied from the current file contents; avoid sending blocks larger than 50 lines. Pass the latest contentHash from read_file as expectedFileHash. On TEXT_NOT_FOUND, inspect cause and retry with suggestedOldText + suggestedStartLine/suggestedEndLine + contentHash when provided instead of re-reading. If the tool returns FILE_CONTENT_CHANGED, do not retry with the old text or merely swap in the returned hash: re-read the current file, review its changes, rebuild oldText/newText against that version, and retry with its new contentHash. Do not omit the hash to bypass a conflict.',
   parameters: {
     type: Type.OBJECT,
     properties: {
@@ -44,7 +47,7 @@ export const replaceTextTool: ToolDefinition = {
       },
       oldText: {
         type: Type.STRING,
-        description: 'Original text or code copied from the latest read_file content (not a stale earlier read or truncated preview). Use a unique 3–15-line anchor; LF/CRLF and Unicode composed/decomposed differences are handled automatically.',
+        description: 'Original text or code copied from the latest read_file content (not a stale earlier read or truncated preview). Use a unique 3–15-line anchor; LF/CRLF, Unicode composed/decomposed differences, indentation, and read_file "N: " line-number prefixes are handled automatically. When a call fails, prefer the returned suggestedOldText as the next oldText.',
       },
       newText: {
         type: Type.STRING,
@@ -53,7 +56,7 @@ export const replaceTextTool: ToolDefinition = {
       matchMode: {
         type: Type.STRING,
         enum: ['auto', 'exact'],
-        description: 'auto (default) accepts equivalent LF/CRLF and indentation; exact matches byte-for-byte only.',
+        description: 'auto (default) accepts equivalent LF/CRLF, Unicode, indentation, and read_file line-number prefixes; exact matches byte-for-byte only (line-number prefixes are not stripped).',
       },
       expectedFileHash: {
         type: Type.STRING,
@@ -184,28 +187,46 @@ export const replaceTextTool: ToolDefinition = {
       const matches = findTextMatches(content, oldText, matchMode);
       if (matches.length === 0) {
         const candidates = findNearbyCandidates(content, oldText);
-        const suggestedRead = candidates[0]
-          ? { path: rawPath, startLine: Math.max(1, candidates[0].line - 3), endLine: candidates[0].line + 6, includeLineNumbers: false }
+        const { cause, hint } = classifyTextNotFoundCause(content, oldText, candidates);
+        const suggestedWindow = candidates[0]
+          ? buildSuggestedEditWindow(content, oldText, candidates[0].line)
+          : undefined;
+        const fullSuggestedWindow = suggestedWindow && !suggestedWindow.truncated ? suggestedWindow : undefined;
+        const suggestedRead = suggestedWindow
+          ? { path: rawPath, startLine: Math.max(1, suggestedWindow.startLine - 3), endLine: suggestedWindow.startLine + Math.min(suggestedWindow.anchorLineCount, MAX_SUGGESTED_READ_LINES) - 1 + 3, includeLineNumbers: false }
           : { path: rawPath, includeLineNumbers: false };
         let diagnostic = 'oldText differs from the current content; the "..." preview on the CLI is only a truncated display and must not be copied as source.';
         if (oldText.length > 1000) {
           diagnostic += ` Warning: oldText is too long (${oldText.length} chars). Narrow oldText to a unique 3-15 line anchor to avoid character drift.`;
         }
-        const candidateDiffHint = candidates[0] ? analyzeCandidateDiff(oldText, candidates[0].preview) : undefined;
+        const anchorDiffHint = candidates[0] ? analyzeCandidateDiff(anchorLineOf(oldText), candidates[0].preview) : undefined;
+        const candidateDiffHint = hint || anchorDiffHint;
+        const retryWithSnippet = fullSuggestedWindow
+          ? `Use suggestedOldText (lines ${fullSuggestedWindow.startLine}-${fullSuggestedWindow.endLine}, raw content without line numbers) as oldText and pass contentHash as expectedFileHash; no re-read is needed.`
+          : suggestedWindow
+            ? `oldText exceeds the ${MAX_SUGGESTED_EDIT_LINES}-line snippet limit; call read_file with ${JSON.stringify(suggestedRead)}, rebuild a unique anchor, then retry with contentHash.`
+            : '';
         return {
           success: false,
           path: rawPath,
-          error: `oldText not found in "${rawPath}" after exact, LF/CRLF, Unicode and safe-indentation checks.`,
+          error: `oldText not found in "${rawPath}" after exact, LF/CRLF, Unicode, whitespace, indentation and line-number-prefix checks.`,
           errorCode: 'TEXT_NOT_FOUND',
+          cause,
           diagnostic,
           candidateDiffHint,
           observedFileHash,
+          contentHash: observedFileHash,
           oldTextLength: oldText.length,
           candidates,
+          suggestedOldText: fullSuggestedWindow?.text,
+          suggestedStartLine: fullSuggestedWindow?.startLine,
+          suggestedEndLine: fullSuggestedWindow?.endLine,
           suggestedRead,
           suggestion: candidateDiffHint
-            ? `Detected: ${candidateDiffHint} Adjust oldText or re-read via read_file.`
-            : `Call read_file with ${JSON.stringify(suggestedRead)}, get the raw content (without line numbers), then call replace_text again with the new contentHash.`,
+            ? `Detected (${cause}): ${candidateDiffHint}${retryWithSnippet ? ` ${retryWithSnippet}` : ' Adjust oldText or re-read via read_file.'}`
+            : retryWithSnippet
+              ? retryWithSnippet
+              : `Call read_file with ${JSON.stringify(suggestedRead)}, get the raw content (without line numbers), then call replace_text again with the new contentHash.`,
         };
       }
 
@@ -225,7 +246,15 @@ export const replaceTextTool: ToolDefinition = {
       }
 
       const match = matches[0];
-      const replacement = prepareReplacement(newText, content, match);
+      let effectiveNewText = newText;
+      if (match.lineNumbersStripped) {
+        const strippedNew = stripLineNumberPrefixes(newText);
+        const strippedOld = stripLineNumberPrefixes(oldText);
+        if (strippedNew && strippedOld && strippedNew.blockStartLine === strippedOld.blockStartLine) {
+          effectiveNewText = strippedNew.text;
+        }
+      }
+      const replacement = prepareReplacement(effectiveNewText, content, match);
       const updatedContent = content.slice(0, match.start) + replacement + content.slice(match.end);
 
       // In-Memory AST Syntax Validation Guardrail (SWE-agent ACI Standard)
@@ -313,6 +342,7 @@ export const replaceTextTool: ToolDefinition = {
         path: rawPath,
         success: true,
         matchStrategy: match.strategy,
+        ...(match.lineNumbersStripped ? { lineNumbersStripped: true, baseMatchStrategy: match.baseStrategy } : {}),
         line: match.line,
         previousContentHash: observedFileHash,
         contentHash: hashContent(updatedContent),
@@ -341,6 +371,10 @@ export function findTextMatches(content: string, oldText: string, mode: 'auto' |
   }));
   if (mode === 'exact') return exact;
 
+  return findAutoMatches(content, oldText, true);
+}
+
+function findAutoMatches(content: string, oldText: string, allowLineNumberFallback: boolean): TextMatch[] {
   const normalizedContent = normalizeLineEndingsWithBoundaries(content);
   const normalizedOldText = normalizeLineEndingsWithBoundaries(oldText).text;
   const eolEquivalent = findAllRanges(normalizedContent.text, normalizedOldText).map(({ start, end }) => {
@@ -367,7 +401,67 @@ export function findTextMatches(content: string, oldText: string, mode: 'auto' |
   const indentMatches = findIndentationEquivalentMatches(content, normalizedContent, normalizedOldText);
   if (indentMatches.length > 0) return indentMatches;
 
-  return findWhitespaceEquivalentMatches(content, normalizedContent, normalizedOldText);
+  const whitespaceMatches = findWhitespaceEquivalentMatches(content, normalizedContent, normalizedOldText);
+  if (whitespaceMatches.length > 0) return whitespaceMatches;
+
+  return allowLineNumberFallback ? findLineNumberStrippedMatches(content, oldText) : [];
+}
+
+interface StrippedLineNumbers {
+  text: string;
+  blockStartLine: number;
+}
+
+/**
+ * read_file defaults to "N: content" output. Strip that prefix only when every
+ * non-empty line is numbered and the numbers advance with the line offset, so
+ * legitimate content that happens to start with "1: " is left untouched.
+ */
+function stripLineNumberPrefixes(value: string): StrippedLineNumbers | undefined {
+  const normalized = normalizeLineEndingsWithBoundaries(value).text;
+  const hasTrailingEol = normalized.endsWith('\n');
+  const lines = normalized.split('\n');
+  if (hasTrailingEol) lines.pop();
+
+  const strippedLines: string[] = [];
+  const numbered: Array<{ index: number; number: number }> = [];
+  for (let index = 0; index < lines.length; index++) {
+    const line = lines[index];
+    if (line.trim() === '') {
+      strippedLines.push('');
+      continue;
+    }
+    const prefix = line.match(/^\s*(\d+):[ \t]?/);
+    if (!prefix) return undefined;
+    numbered.push({ index, number: Number(prefix[1]) });
+    strippedLines.push(line.slice(prefix[0].length));
+  }
+  if (numbered.length === 0) return undefined;
+
+  const first = numbered[0];
+  const numbersAdvanceWithLines = numbered.every(
+    (entry) => entry.number === first.number + (entry.index - first.index),
+  );
+  if (!numbersAdvanceWithLines) return undefined;
+
+  return {
+    text: strippedLines.join('\n') + (hasTrailingEol ? '\n' : ''),
+    blockStartLine: first.number - first.index,
+  };
+}
+
+function findLineNumberStrippedMatches(content: string, oldText: string): TextMatch[] {
+  const stripped = stripLineNumberPrefixes(oldText);
+  if (!stripped) return [];
+
+  return findAutoMatches(content, stripped.text, false)
+    .filter((match) => match.line === stripped.blockStartLine)
+    .map((match) => ({
+      ...match,
+      strategy: 'normalized_line_numbers' as const,
+      baseStrategy: match.strategy,
+      lineNumbersStripped: true,
+    }));
 }
 
 function findWhitespaceEquivalentMatches(
@@ -451,7 +545,8 @@ function findIndentationEquivalentMatches(
 function prepareReplacement(newText: string, content: string, match: TextMatch): string {
   const eol = detectLocalEol(content.slice(match.start, match.end)) || detectDominantEol(content);
   let normalized = normalizeLineEndingsWithBoundaries(newText).text;
-  if (match.strategy === 'normalized_indentation' || match.strategy === 'normalized_whitespace') {
+  const effectiveStrategy = match.baseStrategy ?? match.strategy;
+  if (effectiveStrategy === 'normalized_indentation' || effectiveStrategy === 'normalized_whitespace') {
     const hasTrailingEol = normalized.endsWith('\n');
     const lines = normalized.split('\n');
     if (hasTrailingEol) lines.pop();
@@ -516,6 +611,103 @@ function canonicalizeIndentedBlock(lines: string[]): { canonical: string; lines:
   const indentation = nonEmpty[0]?.slice(0, indentationLength) || '';
   const dedented = trimmedRight.map((line) => line.trim() ? line.slice(indentationLength) : '');
   return { canonical: dedented.join('\n'), lines: dedented, indentation };
+}
+
+type TextNotFoundCause =
+  | 'LINE_NUMBER_PREFIX'
+  | 'TRUNCATION_MARKER'
+  | 'BLANK_LINE_DRIFT'
+  | 'STALE_CONTENT'
+  | 'UNKNOWN';
+
+const TRUNCATION_MARKERS = [
+  '... [truncated',
+  '[... Truncated',
+  '[OUTPUT TRUNCATED',
+  'FULL TOOL OUTPUT SAVED TO DISK',
+  '[diff truncated]',
+];
+
+function anchorLineOf(text: string): string {
+  return normalizeLineEndingsWithBoundaries(text).text
+    .split('\n')
+    .map((line) => line.trim())
+    .find(Boolean) || '';
+}
+
+function classifyTextNotFoundCause(
+  content: string,
+  oldText: string,
+  candidates: Array<{ line: number; preview: string; score: number }>,
+): { cause: TextNotFoundCause; hint?: string } {
+  const stripped = stripLineNumberPrefixes(oldText);
+  if (stripped) {
+    return {
+      cause: 'LINE_NUMBER_PREFIX',
+      hint: `oldText still contains read_file line-number prefixes ("N: "), but the stripped block does not align with line ${stripped.blockStartLine}; the file may have changed.`,
+    };
+  }
+  if (TRUNCATION_MARKERS.some((marker) => oldText.includes(marker))) {
+    return {
+      cause: 'TRUNCATION_MARKER',
+      hint: 'oldText contains a display truncation marker ("... [truncated N chars]" or a spill notice); those markers are not part of the source file.',
+    };
+  }
+  if (hasBlankLineDrift(content, oldText)) {
+    return {
+      cause: 'BLANK_LINE_DRIFT',
+      hint: 'oldText differs from the file only by blank lines; adjust the blank lines to match the current file.',
+    };
+  }
+  if (candidates.length === 0) {
+    return {
+      cause: 'STALE_CONTENT',
+      hint: 'No similar line exists in the current file; oldText is likely stale or from another file.',
+    };
+  }
+  return { cause: 'UNKNOWN' };
+}
+
+function hasBlankLineDrift(content: string, oldText: string): boolean {
+  const oldLines = normalizeLineEndingsWithBoundaries(oldText).text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (oldLines.length < 2) return false;
+  const contentWithoutBlanks = normalizeLineEndingsWithBoundaries(content).text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join('\n');
+  return contentWithoutBlanks.includes(oldLines.join('\n'));
+}
+
+const MAX_SUGGESTED_EDIT_LINES = 50;
+const MAX_SUGGESTED_READ_LINES = 800;
+
+function buildSuggestedEditWindow(
+  content: string,
+  oldText: string,
+  candidateLine: number,
+): { text: string; startLine: number; endLine: number; truncated: boolean; anchorLineCount: number } | undefined {
+  const lines = normalizeLineEndingsWithBoundaries(content).text.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  if (lines.length === 0) return undefined;
+
+  const stripped = stripLineNumberPrefixes(oldText);
+  const sourceLines = (stripped?.text ?? normalizeLineEndingsWithBoundaries(oldText).text).split('\n');
+  if (sourceLines.length > 0 && sourceLines[sourceLines.length - 1] === '') sourceLines.pop();
+  const desiredLines = Math.min(Math.max(sourceLines.length, 1), MAX_SUGGESTED_EDIT_LINES);
+
+  const startLine = Math.min(Math.max(candidateLine, 1), lines.length);
+  const endLine = Math.min(lines.length, startLine + desiredLines - 1);
+  return {
+    text: lines.slice(startLine - 1, endLine).join('\n'),
+    startLine,
+    endLine,
+    truncated: endLine - startLine + 1 < sourceLines.length,
+    anchorLineCount: Math.max(sourceLines.length, 1),
+  };
 }
 
 function findNearbyCandidates(content: string, oldText: string): Array<{ line: number; preview: string; score: number }> {

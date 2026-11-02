@@ -77,8 +77,11 @@ export function observedMutationFiles(toolName: string, args: Record<string, any
   if (!hasObservedMutation(toolName, result)) return [];
   const files = new Set<string>();
   const add = (value: unknown) => { if (typeof value === 'string' && value.trim()) files.add(value.trim()); };
-  for (const key of ['filesModified', 'modifiedFiles', 'filesCreated', 'filesDeleted', 'changedFiles']) {
+  for (const key of ['filesModified', 'modifiedFiles', 'filesCreated', 'filesDeleted', 'changedFiles', 'deleted']) {
     if (Array.isArray(result[key])) for (const file of result[key]) add(typeof file === 'string' ? file : file?.path);
+  }
+  if (Array.isArray(args.paths)) {
+    for (const file of args.paths) add(file);
   }
   if (Array.isArray(args.targetFiles)) {
     for (const file of args.targetFiles) add(file);
@@ -97,7 +100,7 @@ export function hasObservedMutation(toolName: string, result: Record<string, any
   if (!FILE_MUTATION_TOOLS.has(toolName) && result.mutationApplied !== true) return false;
   if (toolResultFailed(result) || result.changed === false || result.noChanges === true || result.rolledBack === true) return false;
   if (typeof result.totalModifiedFiles === 'number' && result.totalModifiedFiles === 0) return false;
-  const lists = ['filesModified', 'modifiedFiles', 'filesCreated', 'filesDeleted', 'changedFiles']
+  const lists = ['filesModified', 'modifiedFiles', 'filesCreated', 'filesDeleted', 'changedFiles', 'deleted']
     .map((key) => result[key]).filter(Array.isArray);
   if (lists.length) return lists.some((files) => files.length > 0);
   return FILE_MUTATION_TOOLS.has(toolName);

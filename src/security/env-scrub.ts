@@ -3,6 +3,7 @@
  * Goal: host secrets never leak into spawned processes or back into LLM context.
  * Cost when idle: zero (pure functions, no I/O, no schema weight).
  */
+import type { GateReader } from './full-access-gates.js';
 
 const SECRET_KEY_PATTERN = /(secret|token|api[_-]?key|password|passwd|private[_-]?key|auth|bearer|session|credential)/i;
 
@@ -16,8 +17,30 @@ const TOKEN_SHAPES: RegExp[] = [
   /AKIA[0-9A-Z]{16}/g,
 ];
 
+/**
+ * Non-secret hardening defaults for children. Giữ nguyên ngay cả khi gate 7 mở:
+ * full access thêm token host, không bỏ hardening.
+ */
+const HARDENING_DEFAULTS: Record<string, string> = {
+  CI: 'true',
+  DEBIAN_FRONTEND: 'noninteractive',
+  PAGER: 'cat',
+  GIT_TERMINAL_PROMPT: '0',
+  FORCE_COLOR: '0',
+  npm_config_yes: 'true',
+  PYTHONIOENCODING: 'utf-8',
+};
+
 /** Minimal safe base env (mirrors LocalProcessSandbox allowlist). */
-export function buildSafeChildEnv(extra?: Record<string, string>): Record<string, string> {
+export function buildSafeChildEnv(extra?: Record<string, string>, gates?: GateReader): Record<string, string> {
+  if (gates?.('child_env_scrub')) {
+    // Gate 7: token của host phải tới được gh/aws/gcloud — env con là process.env + extra.
+    const hostEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(process.env)) {
+      if (typeof value === 'string') hostEnv[key] = value;
+    }
+    return { ...hostEnv, ...HARDENING_DEFAULTS, ...(extra || {}) };
+  }
   const base: Record<string, string> = {
     PATH: process.env.PATH || '',
     HOME: process.env.HOME || process.env.USERPROFILE || '',
@@ -33,13 +56,7 @@ export function buildSafeChildEnv(extra?: Record<string, string>): Record<string
         }
       : {}),
     NODE_ENV: 'development',
-    CI: 'true',
-    DEBIAN_FRONTEND: 'noninteractive',
-    PAGER: 'cat',
-    GIT_TERMINAL_PROMPT: '0',
-    FORCE_COLOR: '0',
-    npm_config_yes: 'true',
-    PYTHONIOENCODING: 'utf-8',
+    ...HARDENING_DEFAULTS,
   };
   if (extra) {
     // Explicit per-call env (cd/export prefixes) is honored — values are

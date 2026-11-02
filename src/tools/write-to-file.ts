@@ -12,7 +12,7 @@ export const writeToFileTool: ToolDefinition = {
     const normalizedArgs = {
       path: args.path || args.TargetFile,
       content: args.content !== undefined ? args.content : args.CodeContent,
-      allowOverwrite: args.allowOverwrite !== undefined ? args.allowOverwrite : args.Overwrite,
+      overwrite: args.overwrite ?? args.allowOverwrite ?? args.Overwrite,
     };
     return writeFileTool.execute(normalizedArgs, workspace);
   },

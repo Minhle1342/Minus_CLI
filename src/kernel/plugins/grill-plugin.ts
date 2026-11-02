@@ -1,3 +1,4 @@
+import { Type } from '@google/genai';
 import type { AgentPlugin, KernelContext } from '../kernel.js';
 import type { ToolDefinition } from '../../tools/types.js';
 import type { Workspace } from '../../workspace/workspace.js';
@@ -24,20 +25,20 @@ export function createAskUserTool(ctx: KernelContext): ToolDefinition {
     name: 'ask_user',
     description: 'Ask the user to clarify requirements, select between architectural approaches, or provide input when facing ambiguities or high-risk actions.',
     parameters: {
-      type: 'object',
+      type: Type.OBJECT,
       properties: {
         question: {
-          type: 'string',
+          type: Type.STRING,
           description: 'The focused question to clarify with the user.',
         },
         options: {
-          type: 'array',
+          type: Type.ARRAY,
           items: {
-            type: 'object',
+            type: Type.OBJECT,
             properties: {
-              label: { type: 'string', description: 'Brief description of this option.' },
-              detail: { type: 'string', description: 'Optional explanation of trade-offs or implications.' },
-              recommended: { type: 'boolean', description: 'True if this is the LLM-recommended choice.' },
+              label: { type: Type.STRING, description: 'Brief description of this option.' },
+              detail: { type: Type.STRING, description: 'Optional explanation of trade-offs or implications.' },
+              recommended: { type: Type.BOOLEAN, description: 'True if this is the LLM-recommended choice.' },
             },
             required: ['label'],
           },

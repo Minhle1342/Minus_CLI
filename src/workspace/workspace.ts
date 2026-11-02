@@ -1,6 +1,18 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { getNativeCore } from '../native/index.js';
+import { CLOSED_GATES, type FullAccessGate, type GateReader } from '../security/full-access-gates.js';
+
+/**
+ * Reader gate full access toàn cục mà mọi Workspace rơi về khi không có override
+ * theo instance. Kernel nối một lần lúc boot; reader là closure live trên
+ * `PermissionManager.effectiveMode()` nên không có state second để lệch.
+ */
+let defaultWorkspaceGates: GateReader | undefined;
+
+export function setDefaultWorkspaceGates(reader: GateReader | undefined): void {
+  defaultWorkspaceGates = reader;
+}
 
 /**
  * Workspace quản lý thư mục làm việc và thiết lập ranh giới an toàn cho Coding Agent.
@@ -168,6 +180,19 @@ export class Workspace {
   // Danh sách các file nhạy cảm cần chặn ghi đè trực tiếp (mặc định rỗng hoặc tùy chỉnh khi cần)
   protectedFiles: string[];
 
+  /**
+   * Gate full access cho ranh giới workspace và file protected. Mặc định đóng;
+   * kernel nối reader thật một lần lúc boot (`setDefaultWorkspaceGates`), nên mọi
+   * Workspace — kể cả instance dựng sau đó cho worktree subagent hay spec branch —
+   * đọc đúng mode hiện hành. `setGates()` ghi đè theo instance (dùng trong test).
+   */
+  private gates?: GateReader;
+
+  /** Reader áp dụng: override theo instance, nếu không thì default toàn cục, nếu không thì đóng. */
+  private gateReader(): GateReader {
+    return this.gates ?? defaultWorkspaceGates ?? CLOSED_GATES;
+  }
+
   constructor(rootDir: string = process.cwd(), options?: { protectedFiles?: string[]; ignoredDirectories?: string[]; binaryExtensions?: string[] }) {
     this.rootDir = path.resolve(rootDir);
     try {
@@ -184,11 +209,23 @@ export class Workspace {
     }
   }
 
+  /** Nối reader gate thật theo instance — reader thiếu thì rơi về default toàn cục. */
+  setGates(gates: GateReader | undefined): void {
+    this.gates = gates;
+  }
+
+  /** Cho call site dẫn xuất (vd. quét escape trong shell command) hỏi đúng một gate. */
+  opensGate(gate: FullAccessGate): boolean {
+    return this.gateReader()(gate);
+  }
+
   /**
    * Kiểm tra và chuẩn hoá đường dẫn an toàn trong workspace.
    * Ném ra lỗi Security Exception nếu đường dẫn cố tình thoát ra ngoài workspace hoặc trỏ qua symlink ra ngoài.
    */
   resolveSafePath(targetPath: string): string {
+    // Gate 3 (workspace_boundary): full access bỏ cả nhánh native lẫn kiểm tra symlink.
+    if (this.gateReader()('workspace_boundary')) return path.resolve(this.rootDir, targetPath);
     const native = getNativeCore();
     if (native) {
       try {
@@ -264,6 +301,8 @@ export class Workspace {
    * Kiểm tra xem một file có thuộc danh sách bảo vệ (không cho ghi đè) hay không.
    */
   isProtectedFile(filePath: string): boolean {
+    // Gate 6 (protected_files): full access = không file nào được bảo vệ.
+    if (this.gateReader()('protected_files')) return false;
     if (!this.protectedFiles || this.protectedFiles.length === 0) return false;
     const baseName = path.basename(filePath);
     return this.protectedFiles.includes(baseName);

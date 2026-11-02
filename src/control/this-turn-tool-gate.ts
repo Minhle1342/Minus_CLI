@@ -6,12 +6,13 @@ import { isOrchestrationTool, ORCHESTRATION_SPAWN_TOOL_NAMES } from './phase-too
 import { hasCodeGraphIndexSync } from '../search/codegraph-client.js';
 import { detectArchitectureAnalysisIntent } from '../agent/final-answer-guard.js';
 import { hasNetworkIntent } from './network-intent.js';
+import type { GateReader } from '../security/full-access-gates.js';
 
 const PHASE_TRANSITION_TASK_CLASSES = new Set(['bugfix', 'feature', 'refactor', 'question', 'exploration']);
 
 /** Small phase-specific exploration anchors pinned after relevance retrieval. */
 const PHASE_EXPLORE_TOOL_ANCHORS: Record<string, readonly string[]> = {
-  explore: ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics'],
+  explore: ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics', 'run_command'],
   plan: ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'codegraph_explore', 'codegraph_impact', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology'],
   implement: ['read_file', 'get_symbol_context_360', 'get_diagnostics'],
   verify: ['read_file', 'get_diagnostics', 'run_command'],
@@ -60,6 +61,7 @@ export interface ThisTurnToolGateOptions {
   userRequest?: string;
   hasCodeGraph?: boolean;
   isArchitectureQuery?: boolean;
+  gates?: GateReader;
 }
 
 export class ThisTurnToolGate {
@@ -74,6 +76,8 @@ export class ThisTurnToolGate {
     const allowed: ToolDefinition[] = [];
     const denied: string[] = [];
     const riskRank = { R0: 0, R1: 1, R2: 2, R3: 3, R4: 4, R5: 5 } as const;
+    // full_access: phase không còn là nguồn quyền hạn ⇒ mọi tool được trao ngay.
+    const phaseMaskingOpen = Boolean(options?.gates?.('phase_masking'));
 
     for (const tool of tools) {
       const descriptor = this.descriptors.describe(tool);
@@ -88,7 +92,7 @@ export class ThisTurnToolGate {
       const isAuthorizedEdit = EDIT_TOOL_NAMES.has(tool.name)
         && ['implement', 'verify', 'release'].includes(classification.phase)
         && required.has('edit');
-      if (descriptor.mutates && !orchestrationAllowed && (['explore', 'plan'].includes(classification.phase)
+      if (!phaseMaskingOpen && descriptor.mutates && !orchestrationAllowed && (['explore', 'plan'].includes(classification.phase)
         || classification.reversibility === 'read-only')) {
         denied.push(tool.name);
         continue;
@@ -118,7 +122,7 @@ export class ThisTurnToolGate {
         || orchestrationAllowed
         || isAuthorizedEdit;
 
-      if ((!isPhaseTransitionTool && capabilityMatch && phaseMatch && riskMatch) || isPhaseTransitionRequest) {
+      if (phaseMaskingOpen || (!isPhaseTransitionTool && capabilityMatch && phaseMatch && riskMatch) || isPhaseTransitionRequest) {
         allowed.push(tool);
       } else {
         denied.push(tool.name);

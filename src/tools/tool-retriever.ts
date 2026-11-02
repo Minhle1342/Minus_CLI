@@ -1,3 +1,7 @@
+const STOP_WORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'this', 'that', 'you', 'are', 'was', 'were', 'has', 'have', 'all', 'one',
+]);
+
 import MiniSearch from 'minisearch';
 import type { FunctionDeclaration } from '@google/genai';
 import { ToolDefinition } from './types.js';
@@ -109,6 +113,7 @@ export class ToolRetriever {
     this.miniSearch = new MiniSearch<ToolDocument>({
       fields: ['name', 'category', 'tags', 'description', 'parameters'],
       storeFields: ['id', 'name', 'category', 'description'],
+      processTerm: (term) => (STOP_WORDS.has(term.toLowerCase()) ? null : term.toLowerCase()),
       searchOptions: {
         prefix: true,
         fuzzy: 0.2,
@@ -356,7 +361,7 @@ export class ToolRetriever {
     }
 
     // 3. Fallback an toàn: Nếu số lượng tool được chọn quá ít, bổ sung các tool phù hợp từ activePool
-    if (selectedToolNames.size <= this.config.alwaysInclude.length) {
+    if (selectedToolNames.size === 0) {
       for (const tool of activePool) {
         if (selectedToolNames.size >= this.config.alwaysInclude.length + this.config.topK) break;
         selectedToolNames.add(tool.name);
@@ -375,7 +380,7 @@ export class ToolRetriever {
       text.toLowerCase()
         .split(/[^a-z0-9_]+/g)
         .map((term) => term.trim())
-        .filter((term) => term.length >= 3),
+        .filter((term) => term.length >= 3 && !STOP_WORDS.has(term)),
     );
   }
 
@@ -408,6 +413,7 @@ export class ToolRetriever {
     if (/(web|research|paper|documentation|internet)/.test(q) && category === 'network') boost += 0.16;
     if (/(browser|playwright|spa|login|form|e2e|snapshot|navigate)/.test(q) && category === 'browser') boost += 0.22;
     if (/(edit|patch|fix|modify|implement)/.test(q) && category === 'filesystem_mutation') boost += 0.10;
+    if (/(delete|remove|clean|cleanup|unlink|rm|purge|xóa|dọn)/i.test(q) && (category === 'filesystem_deletion' || /delete/.test(toolName))) boost += 0.25;
     if (/(verify|dry.run|check.*match|validate.*edit|pre.check)/.test(q) && category === 'filesystem_verification') boost += 0.20;
     return boost;
   }
@@ -446,6 +452,7 @@ export class ToolRetriever {
     if (name.includes('shared_context') || name.includes('agent_event') || name.includes('subagent') || name.includes('delegate') || name.includes('spawn') || name.includes('agent') || name.includes('dag')) return 'multi_agent';
     if (name.includes('manage_task') || name.includes('schedule') || name.includes('command') || name.includes('sandbox') || name.includes('exec')) return 'process_task';
     if (name.includes('web') || name.includes('fetch') || name.includes('url')) return 'network';
+    if (name.includes('delete') || name.includes('remove') || name.includes('unlink')) return 'filesystem_deletion';
     if (name.includes('file') || name.includes('dir') || name.includes('text') || name.includes('patch')) return 'filesystem_mutation';
     if (name.includes('search') || name.includes('codebase') || name.includes('find')) return 'search';
     if (name.includes('plan') || name.includes('task')) return 'planning';

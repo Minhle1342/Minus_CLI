@@ -80,3 +80,48 @@ test('Docker isolation keeps container paths available', async () => {
   assert.notEqual(result.errorCode, 'SECURITY_VIOLATION');
   assert.equal(executedCommand, 'node /tmp/build.js');
 });
+
+test('Docker isolation permits database query tools and external connections', async () => {
+  const executedCommands: string[] = [];
+  const tool = createRunCommandTool({
+    getStatus: () => ({
+      mode: 'docker', activeProvider: 'Docker Sandbox', isIsolated: true,
+      dockerAvailable: true,
+    }),
+    exec: async (command: string) => {
+      executedCommands.push(command);
+      return { stdout: 'ok', stderr: '', exitCode: 0, durationMs: 1, success: true };
+    },
+  } as any);
+
+  const testCommands = [
+    'psql -h localhost -U postgres -d mydb -c "SELECT 1;"',
+    'mysql -h 127.0.0.1 -u root -e "SHOW DATABASES;"',
+    'sqlite3 test.db ".tables"',
+    'mongosh --eval "db.stats()"',
+    'redis-cli ping',
+    'nc -zv 127.0.0.1 5432',
+    'ssh user@remote-host',
+    'telnet 10.0.0.1 5432',
+    'ftp remote-server',
+    'sftp remote-user@host',
+  ];
+
+  for (const cmd of testCommands) {
+    const result = await tool.execute({ command: cmd }, workspace);
+    assert.equal(result.success, true, `Expected success for: ${cmd}`);
+    assert.equal(result.errorCode, undefined, `Expected no errorCode for: ${cmd}`);
+  }
+  assert.equal(executedCommands.length, testCommands.length);
+});
+
+test('Host execution continues to block remote protocols in Preflight without batch flags', async () => {
+  const hostTool = createRunCommandTool({
+    getStatus: () => ({ mode: 'local', isIsolated: false, dockerAvailable: false }),
+  } as any);
+
+  for (const cmd of ['ssh user@remote', 'telnet host 80', 'ftp example.com', 'sftp user@host']) {
+    const res = await hostTool.execute({ command: cmd, execution_target: 'host' }, workspace);
+    assert.equal(res.preflightCode, 'INTERACTIVE_COMMAND_PROHIBITED', `Expected preflight block for ${cmd}`);
+  }
+});

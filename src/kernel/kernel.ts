@@ -371,7 +371,14 @@ export class AgentKernel {
     }
 
     this.plugins.set(plugin.name, plugin);
-    await plugin.apply(this.ctx);
+    try {
+      await plugin.apply(this.ctx);
+    } catch (error) {
+      // Never leave a plugin recorded as loaded when its registration threw —
+      // the hook/tool state would disagree with getLoadedPlugins().
+      this.plugins.delete(plugin.name);
+      throw error;
+    }
     this.ctx.events.emit('plugin:registered', plugin.name);
     return this;
   }

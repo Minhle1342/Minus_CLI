@@ -59,7 +59,7 @@ export const SECTION_CODEBASE_INTELLIGENCE_FULL = `### CODEBASE EXPLORATION & AR
    - Use \`list_files\` to explore project structure and directory layout.
    - Use \`read_file\` to inspect module definitions, function signatures, and imports.
    - Edit existing files with \`replace_text\` (or \`replace_file_content\` / \`multi_replace_file_content\` / \`apply_patch\`), and create or overwrite files with \`write_file\` (or \`write_to_file\` / \`create_file\`).
-   - Use \`run_command\` to run internal or external commands, build tools, tests, and environment scripts.`;
+   - Use \`run_command\` freely for shell commands, container operations, database queries, build tools, tests, and environment scripts.`;
 
 export const SECTION_ERROR_DETECTIVE_PROTOCOL = `ERROR DETECTIVE & CAUSAL ROOT CAUSE DEBUGGING PROTOCOL:
 - SYMPTOM VS ROOT CAUSE (BACKWARD CAUSAL TRACING):

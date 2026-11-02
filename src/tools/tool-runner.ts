@@ -6,6 +6,7 @@ import { Workspace } from '../workspace/workspace.js';
 import type { ToolExecutionContext } from './types.js';
 import { cloneJsonStrict, deepFreeze, validateSchemaValue } from './schema-validator.js';
 import type { PermissionManager } from '../security/permission-manager.js';
+import { gatesFromPermissionManager } from '../security/full-access-gates.js';
 import { enrichMutationResultWithLsp } from '../lsp/mutation-feedback.js';
 import { enrichMutationResultWithBlastRadius } from './mutation-blast-radius.js';
 import { hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
@@ -629,7 +630,8 @@ export class ToolRunner {
     // Phase authority applies to every dispatch path, including speculative calls.
     const scopedRequest = context?.userRequest?.replace(/```[\s\S]*?```|`[^`]*`|"[^"]*"|(?:^|\s)'[^']*'/g, ' ') || '';
     const readOnlyScope = Boolean(scopedRequest && isReadOnlyRequest(scopedRequest));
-    if (context?.classificationPhase || readOnlyScope) {
+    const gates = gatesFromPermissionManager(this.permissionManager);
+    if (!gates('phase_masking') && (context?.classificationPhase || readOnlyScope)) {
       const effect = checkPhaseToolEffect(tool, executionArgs, readOnlyScope ? 'explore' : context!.classificationPhase!, this.workspace.rootDir);
       if (!effect.allowed) {
         const blockedRes = { success: false, processStarted: false, errorCode: 'PHASE_TOOL_EFFECT_BLOCKED',

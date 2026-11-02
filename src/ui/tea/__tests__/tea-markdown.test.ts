@@ -135,7 +135,7 @@ test('viewportLines: formats thinking markdown like an answer', () => {
     }],
   };
   const fullText = viewportLines(model, 80).join('\n').replace(/\x1b\[[0-9;]*m/g, '');
-  assert.match(fullText, /Thinking › /);
+  assert.match(fullText, /▾ thinking/);
   assert.match(fullText, /Bước 1/);
   assert.match(fullText, /▎ lưu ý: chỉ dẫn này/);
   assert.doesNotMatch(fullText, /\*\*/, 'bold markers must be consumed by the markdown pipeline');
@@ -143,7 +143,7 @@ test('viewportLines: formats thinking markdown like an answer', () => {
   assert.match(fullText, /- đọc/, 'list markers stay visible');
 });
 
-test('viewportLines: khối Thinking mặc định đóng — chỉ dòng đầu + dấu +', () => {
+test('viewportLines: khối Thinking mặc định đóng — chỉ một dòng ▸ thinking + thời lượng', () => {
   const model: ViewportModel = {
     offset: 0,
     thinking: '',
@@ -152,15 +152,14 @@ test('viewportLines: khối Thinking mặc định đóng — chỉ dòng đầu
     collapsed: false,
     entries: [{
       kind: 'thought',
+      ms: 3_400,
       text: 'Đã đọc file config.ts và nhận ra loader đọc sai path.\nTiếp theo cần xem hàm loadConfig() ở dòng 42.',
     }],
   };
   const lines = viewportLines(model, 80).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ''));
   const first = lines[0];
-  assert.match(first, /^\+ Thinking › /, 'khối Thinking mặc định phải có dấu +');
-  assert.match(first, /Đã đọc file config\.ts/, 'hiện dòng đầu nội dung');
-  assert.doesNotMatch(first, /loadConfig/, 'phần còn lại phải ẩn');
-  assert.ok(!lines.join('\n').includes('dòng 42'), 'nội dung sau dòng đầu phải bị ẩn');
+  assert.match(first, /^▸ thinking 3s$/, 'collapsed chỉ còn marker + nhãn thời lượng');
+  assert.ok(!lines.join('\n').includes('config.ts'), 'nội dung reasoning phải ẩn khi đóng');
 });
 
 test('formatAnswer: folds setext H1 underline (===) into a heading', () => {
