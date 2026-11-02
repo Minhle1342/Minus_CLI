@@ -41,3 +41,20 @@ test('approve_all_session is scoped to approved command prefixes', async () => {
   assert.equal(afterClear.allowed, true);
   assert.equal(prompts, 3);
 });
+
+test('delete_file approval request describes every target and recursion', async () => {
+  const pm = new PermissionManager();
+  let captured: any;
+  pm.setPromptHandler(async (request) => {
+    captured = request;
+    return 'reject';
+  });
+
+  await pm.checkPermission('delete_file', { paths: ['dist', 'tmp'], recursive: true });
+  assert.match(captured.summary, /Delete 2 path\(s\) recursively/);
+  assert.ok(captured.summary.includes('dist') && captured.summary.includes('tmp'));
+
+  await pm.checkPermission('delete_file', { path: 'one.txt', recursive: false });
+  assert.match(captured.summary, /Delete 1 path\(s\) from workspace/);
+  assert.ok(!captured.summary.includes('recursively'));
+});
