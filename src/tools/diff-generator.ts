@@ -217,34 +217,43 @@ export async function generateFileToolDiff(
 
   // 5. delete_file
   if (toolName === 'delete_file') {
-    const target = String(args.path || args.filePath || args.targetFile || '').trim();
-    if (!target) return undefined;
+    const targets = [...new Set([
+      ...(Array.isArray(args.paths) ? args.paths.map((p: unknown) => String(p)) : []),
+      ...['path', 'filePath', 'targetFile']
+        .map((key) => args[key])
+        .filter((value) => typeof value === 'string' && value.trim())
+        .map((value) => String(value).trim()),
+    ])].filter(Boolean);
+    if (targets.length === 0) return undefined;
 
-    let existingContent: string | null = null;
-    try {
-      const fullPath = resolvePath(target);
-      existingContent = await fs.readFile(fullPath, 'utf-8');
-    } catch {
-      existingContent = null;
+    const diffs: string[] = [];
+    for (const target of targets) {
+      let existingContent: string | null = null;
+      try {
+        const fullPath = resolvePath(target);
+        existingContent = await fs.readFile(fullPath, 'utf-8');
+      } catch {
+        existingContent = null;
+      }
+
+      if (existingContent !== null) {
+        const lines = existingContent.replace(/\r\n/g, '\n').split('\n');
+        diffs.push([
+          `--- a/${target}`,
+          '+++ /dev/null',
+          `@@ -1,${lines.length} +0,0 @@`,
+          ...lines.map(l => `-${l}`),
+        ].join('\n'));
+      } else {
+        diffs.push([
+          `--- a/${target}`,
+          '+++ /dev/null',
+          '@@ -1,1 +0,0 @@',
+          '-(entire file content will be deleted)',
+        ].join('\n'));
+      }
     }
-
-    if (existingContent !== null) {
-      const lines = existingContent.replace(/\r\n/g, '\n').split('\n');
-      const hunk: string[] = [
-        `--- a/${target}`,
-        '+++ /dev/null',
-        `@@ -1,${lines.length} +0,0 @@`,
-        ...lines.map(l => `-${l}`),
-      ];
-      return hunk.join('\n');
-    }
-
-    return [
-      `--- a/${target}`,
-      '+++ /dev/null',
-      '@@ -1,1 +0,0 @@',
-      '-(entire file content will be deleted)',
-    ].join('\n');
+    return diffs.join('\n\n');
   }
 
   // 6. move_file

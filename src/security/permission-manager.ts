@@ -8,8 +8,9 @@ import { ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
 import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
 import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
 import { isGateOpen } from './full-access-gates.js';
+import type { PermissionMode } from './permission-modes.js';
 
-export type PermissionMode = 'always_ask' | 'ask_sensitive' | 'auto_approve' | 'read_only' | 'full_access';
+export type { PermissionMode } from './permission-modes.js';
 
 export type RiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
 
@@ -477,14 +478,19 @@ export class PermissionManager {
     }
 
     if (toolName === 'delete_file') {
-      const target = String(args.path || args.filePath || args.targetFile || 'unknown file');
+      const single = args.path || args.filePath || args.targetFile;
+      const list = Array.isArray(args.paths) ? args.paths.map((p: unknown) => String(p)) : [];
+      const targets = [...new Set([...(single ? [String(single)] : []), ...list])].filter(Boolean);
+      const shown = targets.slice(0, 3).join(', ') + (targets.length > 3 ? ` (+${targets.length - 3} more)` : '');
+      const target = targets.length > 0 ? shown : 'unknown file';
       const reasonSuffix = args.reason ? `: ${args.reason}` : '';
+      const mode = args.recursive === false ? '' : ' recursively';
       return {
         id,
         toolName,
         category: 'destructive',
         target,
-        summary: `Delete file "${target}" from workspace${reasonSuffix}`,
+        summary: `Delete ${targets.length || 1} path(s)${mode} from workspace: ${target}${reasonSuffix}`,
         riskLevel: 'HIGH',
         details: args,
         timestamp,
