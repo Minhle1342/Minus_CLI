@@ -80,6 +80,42 @@ export function updateComposer(state: ComposerModel, msg: Msg): ComposerModel {
   }
   return { ...state, ...edit, pastedBlocks, selection: undefined, completions: [], selected: 0, completionDismissed: false };
 }
+/**
+ * Di chuyển caret lên/xuống theo dòng hiển thị (kể cả soft-wrap), giữ cột.
+ * Trả về chính state khi không có dòng đích (caller fallback sang hành vi khác).
+ * shortcut: cột được tính lại mỗi lần bấm (không giữ cột mơ ước qua các dòng ngắn)
+ * và dựa trên value thật, nên caret có thể lệch trong pasted-block đang thu gọn.
+ */
+export function moveComposerVertical(state: ComposerModel, width: number, delta: -1 | 1): ComposerModel {
+  if (width < 2) return state;
+  const text = state.value;
+  const rows = wrap('› ' + text, width);
+  // wrapAnsi nở tab thành space → không map ngược được offset; bỏ qua.
+  if (rows.join('') !== '› ' + text.replace(/\n/g, '')) return state;
+  // prefix '› ' chỉ nằm ở dòng đầu — khớp với composerView.
+  const starts = [0];
+  const ends: number[] = [];
+  for (let i = 0; i < rows.length; i++) {
+    const content = i === 0 ? rows[i].slice(2) : rows[i];
+    ends.push(starts[i] + content.length);
+    if (i < rows.length - 1) starts.push(ends[i] + (text[ends[i]] === '\n' ? 1 : 0));
+  }
+  let row = 0;
+  while (row + 1 < starts.length && starts[row + 1] <= state.cursorOffset) row++;
+  const target = row + delta;
+  if (target < 0 || target >= starts.length) return state;
+  const column = displayWidth(text.slice(starts[row], state.cursorOffset));
+  let cursorOffset = starts[target];
+  let used = 0;
+  for (const char of text.slice(starts[target], ends[target])) {
+    const next = used + displayWidth(char);
+    if (next > column) break;
+    used = next;
+    cursorOffset += char.length;
+  }
+  return { ...state, cursorOffset, selection: undefined, completions: [], selected: 0, completionDismissed: false };
+}
+
 /** Project pasted blocks into labels without changing the submitted value. */
 export function composerDisplay(state: ComposerModel): { value: string; cursorOffset: number } {
   let value = '';

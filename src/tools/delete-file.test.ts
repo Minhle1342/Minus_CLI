@@ -4,7 +4,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { deleteFileTool } from './delete-file.js';
+import { generateFileToolDiff } from './diff-generator.js';
 import { Workspace } from '../workspace/workspace.js';
+import { computeFileHash } from '../workspace/workspace-digest.js';
 import { ToolRegistry } from './registry.js';
 import { LoopProgressGuard } from '../agent/loop-progress-guard.js';
 
@@ -105,6 +107,65 @@ test('delete_file blocks deleting protected files like .env or .git', async () =
   }
 });
 
+test('delete_file refuses a recursive delete that would remove a protected entry, unless gate 6 is open', async () => {
+  const { dir, cleanup } = await createTempWorkspace();
+  try {
+    const ws = new Workspace(dir);
+    await fs.mkdir(path.join(dir, 'sub'), { recursive: true });
+    await fs.writeFile(path.join(dir, 'sub', '.env'), 'SECRET=123');
+
+    const blocked = await deleteFileTool.execute({ path: 'sub' }, ws);
+    assert.equal(blocked.success, false);
+    assert.equal(blocked.errorCode, 'SECURITY_VIOLATION');
+    assert.equal(await fs.readFile(path.join(dir, 'sub', '.env'), 'utf8'), 'SECRET=123');
+
+    // full_access: gate 6 mở ⇒ pattern của tool cũng phải mở, không thành gate giả
+    ws.setGates(() => true);
+    const allowed = await deleteFileTool.execute({ path: 'sub' }, ws);
+    assert.equal(allowed.success, true);
+    assert.deepEqual(allowed.deleted, ['sub']);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('delete_file blocks the workspace root even when the path differs only by case', async (t) => {
+  if (process.platform !== 'win32') {
+    t.skip('case-insensitive path comparison is Windows-specific');
+    return;
+  }
+  const { dir, cleanup } = await createTempWorkspace();
+  try {
+    const ws = new Workspace(dir);
+    await fs.writeFile(path.join(dir, 'keep.txt'), 'keep');
+    const result = await deleteFileTool.execute({ path: dir.toUpperCase() }, ws);
+    assert.equal(result.success, false);
+    assert.equal(result.errorCode, 'SECURITY_VIOLATION');
+    assert.equal(await fs.readFile(path.join(dir, 'keep.txt'), 'utf8'), 'keep');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('delete_file refuses to delete when expectedFileHash is stale', async () => {
+  const { dir, cleanup } = await createTempWorkspace();
+  try {
+    const ws = new Workspace(dir);
+    const target = path.join(dir, 'stale.txt');
+    await fs.writeFile(target, 'current');
+    const stale = await deleteFileTool.execute({ path: 'stale.txt', expectedFileHash: 'sha256:deadbeef' }, ws);
+    assert.equal(stale.success, false);
+    assert.equal(await fs.readFile(target, 'utf8'), 'current');
+
+    const currentHash = await computeFileHash(target);
+    const ok = await deleteFileTool.execute({ path: 'stale.txt', expectedFileHash: currentHash }, ws);
+    assert.equal(ok.success, true);
+    assert.deepEqual(ok.deleted, ['stale.txt']);
+  } finally {
+    await cleanup();
+  }
+});
+
 test('delete_file handles leading slash and parameter aliases gracefully', async () => {
   const { dir, cleanup } = await createTempWorkspace();
   try {
@@ -128,6 +189,20 @@ test('delete_file handles leading slash and parameter aliases gracefully', async
     assert.equal(res3.success, true);
     assert.equal(res3.changed, false);
     assert.deepEqual(res3.filesDeleted, []);
+  } finally {
+    await cleanup();
+  }
+});
+
+test('batch delete preview lists every path in the pre-approval diff', async () => {
+  const { dir, cleanup } = await createTempWorkspace();
+  try {
+    await fs.writeFile(path.join(dir, 'a.txt'), 'aaa');
+    await fs.writeFile(path.join(dir, 'b.txt'), 'bbb');
+    const diff = await generateFileToolDiff('delete_file', { paths: ['a.txt', 'b.txt'] }, dir);
+    assert.ok(diff?.includes('a/a.txt'), 'diff must name a.txt');
+    assert.ok(diff?.includes('a/b.txt'), 'diff must name b.txt');
+    assert.ok(diff?.includes('-aaa') && diff?.includes('-bbb'), 'diff must show both contents');
   } finally {
     await cleanup();
   }

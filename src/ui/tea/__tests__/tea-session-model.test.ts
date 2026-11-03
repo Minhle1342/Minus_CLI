@@ -163,6 +163,17 @@ test('câu trả lời tạm thời nằm ngay TRÊN tool call kế tiếp, bọ
   assert.ok(answerIdx > 0 && !/─{10,}/.test(lines[answerIdx - 1]), 'final answer không bị bọc separator');
 });
 
+test('tool result run_command đóng bằng divider ngay dưới output', () => {
+  let m = createRootModel({ width: 80, height: 30 });
+  [m] = update(kernel('tool:before', ['run_command', { command: 'npm test' }]), m);
+  [m] = update(kernel('tool:after', ['run_command', { success: true, output: 'one\ntwo', exitCode: 0 }, 12, { command: 'npm test' }]), m);
+
+  const rows = plain(m).split('\n').map((l) => l.trim());
+  const outputIdx = rows.findIndex((l) => l === 'two');
+  assert.ok(outputIdx >= 0, 'phải thấy output của run_command');
+  assert.match(rows[outputIdx + 1] ?? '', /─{10,}/, 'divider phải nằm ngay dưới tool result');
+});
+
 test('click dấu ▸ trước dòng thinking mở/tắt riêng khối đó', () => {
   let m = createRootModel({ width: 80, height: 24 });
   [m] = update(kernel('model:thought', ['Dòng 1 của reasoning.\nDòng 2 của reasoning.\nDòng 3 của reasoning.']), m);
@@ -206,6 +217,29 @@ test('thinking dùng thời lượng từ kernel lifecycle, không phải wall c
   const thought = m.viewport.entries.find((e) => e.kind === 'thought')!;
   assert.equal(thought.ms, 4_200, 'ms lấy từ endedAt - startedAt của kernel');
   assert.match(plain(m), /▸ thinking 4s/, 'header hiển thị thời lượng đã làm tròn');
+});
+
+test('thinking block mới sau block cũ phải reset clock và có duration riêng', () => {
+  let m = createRootModel({ width: 80, height: 24 });
+  const t1 = 100_000;
+  [m] = update(kernel('model:thinking:start', [{ agentId: 'a', turn: 1, step: 1, startedAt: t1 }]), m);
+  [m] = update(kernel('model:thought', ['Reasoning block 1']), m);
+  [m] = update(kernel('model:thinking:end', [{ agentId: 'a', turn: 1, step: 1, endedAt: t1 + 4_200 }]), m);
+  [m] = update(kernel('model:final_answer', ['done']), m);
+
+  const t2 = 200_000;
+  [m] = update(kernel('model:thinking:start', [{ agentId: 'a', turn: 2, step: 1, startedAt: t2 }]), m);
+  [m] = update(kernel('model:thought', ['Reasoning block 2']), m);
+  [m] = update(kernel('model:thinking:end', [{ agentId: 'a', turn: 2, step: 1, endedAt: t2 + 1_000 }]), m);
+  [m] = update(kernel('model:final_answer', ['done2']), m);
+
+  const thoughts = m.viewport.entries.filter((e) => e.kind === 'thought');
+  assert.equal(thoughts.length, 2, 'hai block thinking phải thành hai entry');
+  assert.equal(thoughts[0].ms, 4_200, 'block 1 giữ duration riêng');
+  assert.equal(thoughts[1].ms, 1_000, 'block 2 phải reset clock, không kế thừa block 1');
+  const text = plain(m);
+  assert.match(text, /▸ thinking 4s/, 'block 1: thinking 4s');
+  assert.match(text, /▸ thinking 1s/, 'block 2: thinking 1s (reset)');
 });
 
 test('dòng thinking live chỉ là trạng thái, không rò rỉ prose reasoning', () => {

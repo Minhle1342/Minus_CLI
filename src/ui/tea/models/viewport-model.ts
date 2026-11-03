@@ -519,9 +519,16 @@ function thinkingLabel(ms?: number): string {
  * - band 'live': đã bọc 2 separator
  * Dùng để không vẽ 2 đường kẻ liền nhau giữa 2 entry.
  */
+/** Tool results are ANSI-painted, so the ✔/✖/⊘ marker is behind an SGR prefix. */
+function isToolResultEntry(entry: TranscriptEntry): boolean {
+  if (entry.kind !== 'tool') return false;
+  // Chỉ đọc phần đầu: output run_command có thể dài hàng chục KB mỗi lần render.
+  return /^[✔✖⊘]/.test(stripTerminalControls(entry.text.slice(0, 64)).trimStart());
+}
+
 function endsWithDivider(entry: TranscriptEntry): boolean {
   if (entry.kind === 'thought' || entry.kind === 'live' || entry.kind === 'compaction') return true;
-  return entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
+  return isToolResultEntry(entry);
 }
 
 /** Rendered lines contributed by one transcript entry (cached per width). */
@@ -562,7 +569,7 @@ function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, p
       }
     }
     // Tool result terminal markers (✔/✖/⊘) close the pair; call rows (›/●) do not.
-    const isToolResult = entry.kind === 'tool' && /^[✔✖⊘]/.test(entry.text.trimStart());
+    const isToolResult = isToolResultEntry(entry);
     if (entry.kind === 'compaction') {
       return [...rendered, pairDivider];
     }
@@ -1041,7 +1048,10 @@ export function ownerArchiveThinking(model: RootModel, ownerOverride?: string, e
   const owner = eventOwnerId(model, ownerOverride);
   const finishedAt = endedAt ?? Date.now();
   if (owner === model.sessions.activeId || !model.sessions.tabs.some(t => t.id === owner)) {
-    if (!model.viewport.thinking) return model;
+    // Dọn clock dù buffer rỗng: không được sót thinkingStartedAt cũ khi block kế bắt đầu.
+    if (!model.viewport.thinking) {
+      return { ...model, viewport: { ...model.viewport, thinking: '', thinkingStartedAt: undefined } };
+    }
     const ms = model.viewport.thinkingStartedAt ? Math.max(0, finishedAt - model.viewport.thinkingStartedAt) : undefined;
     return { ...model, viewport: {
       ...appendEntry(model.viewport, { kind: 'thought', text: model.viewport.thinking, ms }),
@@ -1049,11 +1059,13 @@ export function ownerArchiveThinking(model: RootModel, ownerOverride?: string, e
       thinkingStartedAt: undefined,
     } };
   }
-  const tabs = model.sessions.tabs.map(t => (t.id === owner && t.thinking)
-    ? { ...t, entries: [...(t.entries || []).slice(-999), { kind: 'thought' as const, text: t.thinking,
+  const tabs = model.sessions.tabs.map(t => {
+    if (t.id !== owner) return t;
+    if (!t.thinking) return { ...t, thinking: '', thinkingStartedAt: undefined };
+    return { ...t, entries: [...(t.entries || []).slice(-999), { kind: 'thought' as const, text: t.thinking,
         ms: t.thinkingStartedAt ? Math.max(0, finishedAt - t.thinkingStartedAt) : undefined }],
-        thinking: '', thinkingStartedAt: undefined, unread: (t.unread || 0) + 1 }
-    : t);
+        thinking: '', thinkingStartedAt: undefined, unread: (t.unread || 0) + 1 };
+  });
   return { ...model, sessions: { ...model.sessions, tabs } };
 }
 

@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { Type } from '@google/genai';
 import type { ToolDefinition } from './types.js';
 import { Workspace } from '../workspace/workspace.js';
+import { computeFileHash } from '../workspace/workspace-digest.js';
 import { toolError, toolSuccess } from './tool-result.js';
 import { forceReleaseWindowsFileLock } from './windows-file-unlocker.js';
 
@@ -17,7 +18,9 @@ const SENSITIVE_TARGET_PATTERNS = [
   /\.npmrc/i,
 ];
 
+/** Gate 6 áp cho cả danh sách pattern của tool: full access = không file nào bị chặn. */
 function isProtected(target: string, resolved: string, workspace: Workspace): boolean {
+  if (workspace.opensGate('protected_files')) return false;
   if (workspace.isProtectedFile(target) || workspace.isProtectedFile(resolved)) {
     return true;
   }
@@ -26,13 +29,28 @@ function isProtected(target: string, resolved: string, workspace: Workspace): bo
   return SENSITIVE_TARGET_PATTERNS.some((pattern) => pattern.test(normalized) || pattern.test(base));
 }
 
-async function safeRemove(targetPath: string, isRecursive: boolean): Promise<void> {
+/** Xóa đệ quy không được lách guard: quét cây trước và trả entry bị bảo vệ đầu tiên. */
+async function firstProtectedEntry(dir: string, workspace: Workspace): Promise<string | undefined> {
+  // shortcut: quét cả cây (kể cả node_modules) tốn thêm một lượt readdir; chỉ chạy khi target là thư mục.
+  const entries = await fs.readdir(dir, { recursive: true }).catch(() => [] as string[]);
+  for (const entry of entries) {
+    const rel = String(entry);
+    if (isProtected(rel, path.join(dir, rel), workspace)) return rel;
+  }
+  return undefined;
+}
+
+/** So sánh case-insensitive trên Windows (path.relative), để root không lọt qua biến thể hoa/thường. */
+const isSamePath = (a: string, b: string): boolean => path.relative(a, b) === '';
+
+async function safeRemove(targetPath: string, isRecursive: boolean, allowForceRelease: boolean): Promise<void> {
   try {
     await fs.rm(targetPath, { recursive: isRecursive, force: true });
   } catch (err: any) {
     if (err.code === 'EBUSY' || err.code === 'EPERM') {
-      if (process.platform === 'win32') {
-        // Force-close locking process handles via Windows Restart Manager API
+      if (process.platform === 'win32' && allowForceRelease) {
+        // Force-close locking process handles via Windows Restart Manager API.
+        // Chỉ khi gate host_system_risk mở: dừng process của user là hành vi phá hệ thống.
         await forceReleaseWindowsFileLock(targetPath);
       } else {
         await delay(100);
@@ -73,6 +91,10 @@ export const deleteFileTool: ToolDefinition = {
         type: Type.BOOLEAN,
         description: 'Ignore errors if paths do not exist (default: true).',
       },
+      expectedFileHash: {
+        type: Type.STRING,
+        description: 'Optional: contentHash from read_file; refuses to delete a file whose hash no longer matches.',
+      },
     },
   },
   async execute(args: Record<string, any>, workspace: Workspace = new Workspace()): Promise<Record<string, any>> {
@@ -99,6 +121,7 @@ export const deleteFileTool: ToolDefinition = {
 
     const recursive = args.recursive !== false;
     const force = args.force !== false;
+    const expectedFileHash = args.expectedFileHash ? String(args.expectedFileHash).trim() : undefined;
 
     const deleted: string[] = [];
     const notFound: string[] = [];
@@ -115,14 +138,28 @@ export const deleteFileTool: ToolDefinition = {
         return toolError(`Security violation for path "${target}": ${err.message}`, 'SECURITY_VIOLATION');
       }
 
-      // Tuyệt đối không cho xóa thư mục gốc workspace
-      if (path.resolve(resolved) === wsRoot || target === '.' || target === '') {
+      // Tuyệt đối không cho xóa thư mục gốc workspace (so sánh không phân biệt hoa/thường trên Windows)
+      if (isSamePath(wsRoot, path.resolve(resolved)) || target === '.' || target === '') {
         return toolError('Deleting the workspace root directory is prohibited.', 'SECURITY_VIOLATION');
       }
 
       // Tuyệt đối không cho xóa các file được bảo vệ (.git, .env...)
       if (isProtected(target, resolved, workspace)) {
         return toolError(`Deleting protected file or configuration "${target}" is prohibited.`, 'SECURITY_VIOLATION');
+      }
+
+      // Xóa đệ quy thư mục: chặn nếu bên trong có file/thư mục được bảo vệ
+      if (recursive) {
+        const stats = await fs.lstat(resolved).catch(() => null);
+        if (stats?.isDirectory()) {
+          const protectedEntry = await firstProtectedEntry(resolved, workspace);
+          if (protectedEntry) {
+            return toolError(
+              `Deleting directory "${target}" would remove protected entry "${protectedEntry}".`,
+              'SECURITY_VIOLATION',
+            );
+          }
+        }
       }
     }
 
@@ -139,7 +176,15 @@ export const deleteFileTool: ToolDefinition = {
           continue;
         }
 
-        await safeRemove(resolved, recursive);
+        if (expectedFileHash) {
+          const currentHash = await computeFileHash(resolved);
+          if (currentHash !== expectedFileHash) {
+            errors.push({ path: target, error: `Content hash mismatch (expected ${expectedFileHash}, on disk ${currentHash})` });
+            continue;
+          }
+        }
+
+        await safeRemove(resolved, recursive, workspace.opensGate('host_system_risk'));
         deleted.push(target);
       } catch (err: any) {
         errors.push({ path: target, error: err.message });

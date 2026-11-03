@@ -5356,7 +5356,10 @@ Always write tests first!`;
     { path: crudMovePath, reason: 'Cleanup unit test fixture' },
     workspace,
   );
-  assert(crudDeleteRes.success === true && crudDeleteRes.deleted === true, 'delete_file xóa file an toàn khi có reason');
+  assert(
+    crudDeleteRes.success === true && Array.isArray(crudDeleteRes.deleted) && crudDeleteRes.deleted.includes(crudMovePath),
+    'delete_file xóa file an toàn khi có reason',
+  );
 
   // Cleanup remaining temp test files
   await fs.rm(workspace.resolveSafePath(tempTestFile), { force: true });

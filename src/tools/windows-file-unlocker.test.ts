@@ -43,7 +43,13 @@ test('forceReleaseWindowsFileLock unlocks and deletes locked files on Windows', 
     }
     assert.equal(lockConfirmed, true, 'File should be locked by child process initially');
 
-    // Gọi tool delete_file: cơ chế Windows Restart Manager sẽ giải phóng lock và xóa file
+    // Gate host_system_risk đóng (mode thường): không được kill process giữ file.
+    const blocked = await deleteFileTool.execute({ path: 'locked.txt' }, ws);
+    assert.equal(blocked.success, false);
+    assert.equal(await fs.stat(testFile).then(() => true, () => false), true, 'file must survive without the gate');
+
+    // Full access (gate host_system_risk mở): Restart Manager giải phóng lock và xóa file
+    ws.setGates(() => true);
     const result = await deleteFileTool.execute({ path: 'locked.txt' }, ws);
     assert.equal(result.success, true);
     assert.deepEqual(result.deleted, ['locked.txt']);
