@@ -50,11 +50,12 @@ test('ToolTransitionGraph - Correctly evaluates outcome and assigns Markov prior
   const boostPlanTask = graph.getTransitionBoost('verify_subagent_quality', { success: true }, 'run_command');
   assert.ok(boostPlanTask >= 0.32, 'run_command phải có boost >= 0.32 sau verify_subagent_quality');
 
-  // 8. Sau khi run_command test fail -> formulate_and_verify_hypothesis được boost
-  const boostHypothesisOnFail = graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 1, error: 'fail' }, 'search_codebase_fast');
-  assert.ok(boostHypothesisOnFail >= 0.25, 'search_codebase_fast phải được boost khi test fail');
+  // 8. Sau khi run_command test fail -> search_text được boost
+  const boostHypothesisOnFail = graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 1, error: 'fail' }, 'search_text');
+  assert.ok(boostHypothesisOnFail >= 0.25, 'search_text phải được boost khi test fail');
+  assert.ok(graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 1, error: 'fail' }, 'search_codebase_fast') >= 0.25, 'alias search_codebase_fast cũng được ánh xạ');
 
-  // 9. Sau khi Anti-Fixation Circuit Breaker chặn (file bị freeze) -> get_symbol_context_360 được boost, cấm boost mutation tools
+  // 9. Sau khi Anti-Fixation Circuit Breaker chặn (file bị freeze) -> read_file được boost, cấm boost mutation tools
   const boostFixationSymbol = graph.getTransitionBoost('replace_text', { reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED' }, 'read_file');
   const boostFixationMutation = graph.getTransitionBoost('replace_text', { reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED' }, 'replace_text');
   assert.ok(boostFixationSymbol >= 0.35, 'read_file phải có boost >= 0.35 khi file bị circuit breaker freeze');

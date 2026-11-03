@@ -47,7 +47,7 @@ export interface TransitionRule {
 
 const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
   IDLE: {
-    primarySuccessors: ['search_codebase_fast', 'read_file'],
+    primarySuccessors: ['search_text', 'read_file'],
     secondarySuccessors: ['list_files'],
     primaryBoost: 0.15,
     secondaryBoost: 0.08,
@@ -77,7 +77,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.15,
   },
   FAILED_TEST: {
-    primarySuccessors: ['search_codebase_fast'],
+    primarySuccessors: ['search_text'],
     secondarySuccessors: ['replace_text'],
     primaryBoost: 0.28,
     secondaryBoost: 0.12,
@@ -90,12 +90,12 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
   },
   HYPOTHESIS_FORMULATED: {
     primarySuccessors: ['run_command', 'read_file'],
-    secondarySuccessors: ['search_codebase_fast'],
+    secondarySuccessors: ['search_text'],
     primaryBoost: 0.28,
     secondaryBoost: 0.12,
   },
   HYPOTHESIS_FALSIFIED: {
-    primarySuccessors: ['search_codebase_fast'],
+    primarySuccessors: ['search_text'],
     secondarySuccessors: ['read_file'],
     primaryBoost: 0.30,
     secondaryBoost: 0.12,
@@ -113,13 +113,13 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.12,
   },
   MEMORY_RECALLED: {
-    primarySuccessors: ['read_file', 'search_codebase_fast'],
+    primarySuccessors: ['read_file', 'search_text'],
     secondarySuccessors: [],
     primaryBoost: 0.25,
     secondaryBoost: 0.12,
   },
   MEMORY_SAVED: {
-    primarySuccessors: ['read_file', 'search_codebase_fast'],
+    primarySuccessors: ['read_file', 'search_text'],
     secondarySuccessors: [],
     primaryBoost: 0.20,
     secondaryBoost: 0.10,
@@ -162,19 +162,19 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
   },
   EXPLORATION_SUFFICIENCY_BLOCKED: {
     primarySuccessors: ['read_file', 'run_command'],
-    secondarySuccessors: ['search_codebase_fast'],
+    secondarySuccessors: ['search_text'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
   },
   REPRODUCTION_GATE_BLOCKED: {
     primarySuccessors: ['write_file', 'run_command', 'read_file'],
-    secondarySuccessors: ['search_codebase_fast'],
+    secondarySuccessors: ['search_text'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
   },
   ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED: {
     primarySuccessors: ['read_file'],
-    secondarySuccessors: ['search_codebase_fast'],
+    secondarySuccessors: ['search_text'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
   },
@@ -204,12 +204,12 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
   },
   GENERAL_SUCCESS: {
     primarySuccessors: ['read_file'],
-    secondarySuccessors: ['search_codebase_fast', 'run_command'],
+    secondarySuccessors: ['search_text', 'run_command'],
     primaryBoost: 0.12,
     secondaryBoost: 0.06,
   },
   GENERAL_ERROR: {
-    primarySuccessors: ['run_command', 'search_codebase_fast', 'read_file'],
+    primarySuccessors: ['run_command', 'search_text', 'read_file'],
     secondarySuccessors: [],
     primaryBoost: 0.20,
     secondaryBoost: 0.10,
@@ -369,10 +369,11 @@ export class ToolTransitionGraph {
     const rule = TRANSITION_TABLE[outcome];
     if (!rule) return 0;
 
-    if (rule.primarySuccessors.includes(candidateToolName)) {
+    const canonical = candidateToolName === 'search_codebase_fast' ? 'search_text' : candidateToolName;
+    if (rule.primarySuccessors.includes(candidateToolName) || rule.primarySuccessors.includes(canonical)) {
       return rule.primaryBoost;
     }
-    if (rule.secondarySuccessors.includes(candidateToolName)) {
+    if (rule.secondarySuccessors.includes(candidateToolName) || rule.secondarySuccessors.includes(canonical)) {
       return rule.secondaryBoost;
     }
     return 0;
