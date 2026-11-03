@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry, SessionTab, SessionTabsModel } from '../types.js';
 import { createComposer, updateComposer, composerView, composerDisplay, moveComposerVertical } from './composer-model.js';
-import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerNoteThinkingStart, ownerArchiveThinking, ownerClearStream, ownerFlushLiveAnswer, thoughtToggleHit, toggleThought, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle, switchToTab } from './viewport-model.js';
+import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerNoteThinkingStart, ownerArchiveThinking, ownerClearStream, ownerFlushLiveAnswer, thoughtToggleHit, toggleThought, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle, switchToTab, deleteTab } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
 import { diffView, createDiffViewer, visibleDiffLines } from './diff-model.js';
@@ -666,6 +666,12 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         const open = !model.sessions.open;
         const selected = Math.max(0, model.sessions.tabs.findIndex(t => t.id === model.sessions.activeId));
         return [{ ...model, focus: open ? 'sessions' as const : 'composer' as const, palette: { ...model.palette, open: false }, sessions: { ...model.sessions, open, selected: selected >= 0 ? selected : 0 } }, []];
+      }
+      if (msg.key === 'ctrl+d') {
+        if (!model.composer.value.trim() || !model.status.busy) {
+          const activeIdx = Math.max(0, model.sessions.tabs.findIndex(t => t.id === model.sessions.activeId));
+          return deleteTab(model, activeIdx);
+        }
       }
       if (msg.key === 'tab') return action(model, 'mode');
       if (msg.key === 'ctrl+o') return [{ ...model, viewport: { ...model.viewport, collapsed: !model.viewport.collapsed } }, []];

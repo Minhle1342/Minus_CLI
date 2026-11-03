@@ -82,11 +82,9 @@ test('Mechanism 1 (TDD Fast-Pass): allows creating test and scratch files withou
 test('Mechanism 2 (Strict Phase Tool Masking): EDIT_TOOL_NAMES contains all mutating tools', () => {
   const expectedEditTools = [
     'replace_text',
-    'apply_patch',
     'write_file',
     'create_file',
     'delete_file',
-    'move_file',
     'write_to_file',
     'replace_file_content',
     'multi_replace_file_content',
@@ -102,7 +100,7 @@ test('Mechanism 2 (Strict Phase Tool Masking): masking filter strips all edit to
     { name: 'read_file' },
     { name: 'search_codebase_fast' },
     { name: 'replace_text' },
-    { name: 'apply_patch' },
+    { name: 'delete_file' },
     { name: 'write_file' },
     { name: 'request_phase_transition' },
   ];

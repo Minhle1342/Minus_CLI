@@ -1290,33 +1290,47 @@ function smartCloseTab(model: RootModel, index: number, keepOpen = false): [Root
   return deleteTab(model, index);
 }
 
-function deleteTab(model: RootModel, index: number): [RootModel, Cmd[]] {
+export function deleteTab(model: RootModel, index: number): [RootModel, Cmd[]] {
   const state = model.sessions;
   const target = state.tabs[Math.min(Math.max(0, index), state.tabs.length - 1)];
   if (!target) return [model, []];
   const tabs = snapshotActive(model).filter(t => t.id !== target.id);
   if (!tabs.length) {
-    return [{ ...model, status: { ...model.status, notice: 'Không thể xóa tab cuối cùng.' } }, []];
+    newTabSeq = (newTabSeq + 1) % 46656;
+    const id = `session-${Date.now().toString(36)}${newTabSeq.toString(36).padStart(3, '0')}${Math.floor(Math.random() * 36).toString(36)}`;
+    const next: SessionTab[] = [{ id, title: shortTabTitle(id), historyKnown: true, lastActive: Date.now() }];
+    const cmds: Cmd[] = [];
+    if (!target.subagent) cmds.push({ type: 'session-delete', sessionId: target.id });
+    cmds.push({ type: 'session-new', sessionId: id });
+    return [{
+      ...model,
+      focus: 'composer' as const,
+      sessions: { ...model.sessions, open: false, tabs: next, activeId: id, pendingActiveId: id, selected: 0 },
+      viewport: { ...model.viewport, entries: [], thinking: '', answerStream: '', offset: 0, pinned: true },
+      composer: createComposer(),
+      diff: createDiffViewer(),
+      sidebar: { ...model.sidebar, session: shortTabTitle(id), tools: [], tokens: 0, model: model.sessions.defaultModel ?? model.sidebar.model },
+      status: { ...model.status, notice: `Đã xóa tab ${target.title} · Đã tạo session mới` },
+    }, cmds];
   }
-  const deletingActive = state.activeId === target.id;
   const visible = tabs.filter(t => !t.hidden);
   const fallback = visible[Math.min(state.selected, Math.max(0, visible.length - 1))] || tabs[0];
-  const cmds: Cmd[] = deletingActive && fallback.id !== target.id && !fallback.subagent ? [{ type: 'session-switch', sessionId: fallback.id }] : [];
-  // Tab subagent không phải session của kernel → chỉ gỡ khỏi TUI, không gọi xoá session.
+  const cmds: Cmd[] = [];
+  if (fallback.id !== state.activeId && !fallback.subagent) cmds.push({ type: 'session-switch', sessionId: fallback.id });
   if (!target.subagent) cmds.push({ type: 'session-delete', sessionId: target.id });
-  const pending = state.pendingActiveId === target.id ? undefined : deletingActive ? fallback.id : state.pendingActiveId;
+  const pending = state.pendingActiveId === target.id ? undefined : fallback.id;
   const shown = { ...fallback, unread: 0 };
   const shownTabs = tabs.map(t => t.id === fallback.id ? shown : t);
   const chrome = restoreTabChrome(shown);
   return [{
     ...model,
     focus: 'composer' as const,
-    sessions: { ...state, open: false, tabs: shownTabs, activeId: deletingActive ? fallback.id : state.activeId, pendingActiveId: pending, selected: Math.max(0, shownTabs.findIndex(t => t.id === (deletingActive ? fallback.id : state.activeId))) },
-    viewport: deletingActive ? { ...model.viewport, entries: shown.entries || [], thinking: shown.thinking || '', answerStream: shown.answerStream || '', offset: 0, pinned: true } : model.viewport,
-    composer: deletingActive ? chrome.composer : model.composer,
-    diff: deletingActive ? chrome.diff : model.diff,
-    sidebar: deletingActive ? { ...model.sidebar, session: shown.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, shown) } : model.sidebar,
-    status: { ...model.status, notice: `Đã xóa tab ${target.title} (session rỗng)` },
+    sessions: { ...state, open: false, tabs: shownTabs, activeId: fallback.id, pendingActiveId: pending, selected: Math.max(0, shownTabs.findIndex(t => t.id === fallback.id)) },
+    viewport: { ...model.viewport, entries: shown.entries || [], thinking: shown.thinking || '', answerStream: shown.answerStream || '', offset: 0, pinned: true },
+    composer: chrome.composer,
+    diff: chrome.diff,
+    sidebar: { ...model.sidebar, session: shown.title, tools: chrome.tools, tokens: chrome.tokens, model: tabDisplayModel(model, shown) },
+    status: { ...model.status, notice: `Đã xóa tab ${target.title}` },
   }, cmds];
 }
 
@@ -1328,6 +1342,9 @@ export function sessionTabsKey(msg: KeyMsg, model: RootModel): [RootModel, Cmd[]
   switch (msg.key) {
     case 'escape':
       return [{ ...model, focus: 'composer' as const, sessions: { ...state, open: false } }, []];
+    case 'ctrl+d':
+      if (!count) return [model, []];
+      return deleteTab(model, state.selected);
     case 'up':
     case 'left':
       if (!count) return [model, []];

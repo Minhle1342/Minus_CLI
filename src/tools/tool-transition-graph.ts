@@ -221,7 +221,6 @@ const MUTATION_TOOLS = new Set([
   'write_file',
   'create_file',
   'delete_file',
-  'move_file',
   'write_to_file',
   'replace_file_content',
   'multi_replace_file_content',
@@ -231,11 +230,6 @@ const DISCOVERY_TOOLS = new Set([
   'search_codebase_fast',
   'search_text',
   'list_files',
-  'find_files',
-  'read_compressed_code',
-  'pack_codebase',
-  'codegraph_search',
-  'codegraph_explore',
 ]);
 
 export class ToolTransitionGraph {

@@ -42,12 +42,10 @@ export const READ_TOOL_NAMES = new Set([
   'list_skills',
 ]);
 export const EDIT_TOOL_NAMES = new Set([
-  'apply_patch',
   'replace_text',
   'write_file',
   'create_file',
   'delete_file',
-  'move_file',
   'write_to_file',
   'replace_file_content',
   'multi_replace_file_content',

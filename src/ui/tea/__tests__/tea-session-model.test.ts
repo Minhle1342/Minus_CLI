@@ -368,3 +368,63 @@ test('session awaiting input is prioritized and pinned in tab strip and sessions
   assert.equal(tabBAfter?.awaitingInput, false);
 });
 
+
+test('ctrl+d on main screen deletes active tab and switches to nearest tab', () => {
+  let m = twoTabs(); // tabs: 'a', 'b'. activeId: 'a'
+  assert.equal(m.sessions.tabs.length, 2);
+  assert.equal(m.sessions.activeId, 'a');
+
+  // Bấm ctrl+d khi composer rỗng
+  let cmds: any[];
+  [m, cmds] = update(key('ctrl+d'), m);
+
+  assert.equal(m.sessions.tabs.length, 1);
+  assert.equal(m.sessions.activeId, 'b');
+  assert.ok(cmds.some((c) => c.type === 'session-delete' && c.sessionId === 'a'));
+  assert.ok(cmds.some((c) => c.type === 'session-switch' && c.sessionId === 'b'));
+});
+
+test('ctrl+d on main screen is ignored when composer has text and status is busy', () => {
+  let m = twoTabs();
+  m = { ...m, composer: { ...m.composer, value: 'draft prompt' }, status: { ...m.status, busy: true } };
+
+  let cmds: any[];
+  [m, cmds] = update(key('ctrl+d'), m);
+
+  assert.equal(m.sessions.tabs.length, 2);
+  assert.equal(m.sessions.activeId, 'a');
+  assert.equal(cmds.length, 0);
+});
+
+test('ctrl+d in sessions modal deletes selected tab', () => {
+  let m = twoTabs();
+  [m] = update(key('ctrl+t'), m); // Mở sessions modal
+  assert.equal(m.sessions.open, true);
+
+  // Chọn tab 'b' (index 1)
+  [m] = update(key('down'), m);
+  assert.equal(m.sessions.selected, 1);
+
+  // Bấm ctrl+d để xóa tab đang chọn
+  let cmds: any[];
+  [m, cmds] = update(key('ctrl+d'), m);
+
+  assert.equal(m.sessions.tabs.length, 1);
+  assert.equal(m.sessions.activeId, 'a');
+  assert.ok(cmds.some((c) => c.type === 'session-delete' && c.sessionId === 'b'));
+});
+
+test('ctrl+d on the only remaining tab deletes it and auto-spawns a new tab', () => {
+  let m = createRootModel({ width: 100, height: 24 });
+  [m] = update(meta({ sessions: ['Solo'], sessionIds: ['solo-1'], session: 'Solo', activeSessionId: 'solo-1' }), m);
+  assert.equal(m.sessions.tabs.length, 1);
+
+  let cmds: any[];
+  [m, cmds] = update(key('ctrl+d'), m);
+
+  // Tab cũ solo-1 đã bị xóa, tự động tạo 1 tab mới
+  assert.equal(m.sessions.tabs.length, 1);
+  assert.notEqual(m.sessions.activeId, 'solo-1');
+  assert.ok(cmds.some((c) => c.type === 'session-delete' && c.sessionId === 'solo-1'));
+  assert.ok(cmds.some((c) => c.type === 'session-new'));
+});

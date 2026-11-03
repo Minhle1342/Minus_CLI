@@ -375,7 +375,7 @@ export class DomainIntentGuardian {
     const { toolName, args } = toolCall;
 
     // 1. Kiểm tra Test Tampering khi sửa đổi file
-    if (isMutationTool(toolName)) {
+    if (isMutationTool(toolName) || toolName === 'apply_patch') {
       const targetPath = (args.TargetFile || args.AbsolutePath || args.path || args.filePath || args.target_path || args.file_path || '').toString();
       const patchPaths = String(args.patch || args.Patch || args.patchText || '').split(/\r?\n/)
         .flatMap(line => /^\*\*\* (?:Add|Update|Delete) File: (.+)$/.exec(line)?.slice(1) || []);

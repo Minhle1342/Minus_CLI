@@ -7,10 +7,8 @@ import path from 'node:path';
 export const FILE_MUTATION_TOOLS = new Set([
   'replace_text',
   'write_file',
-  'apply_patch',
   'create_file',
   'delete_file',
-  'move_file',
   'write_to_file',
   'replace_file_content',
   'multi_replace_file_content',
@@ -103,7 +101,7 @@ export async function generateFileToolDiff(
   args: Record<string, any>,
   workspaceRoot?: string
 ): Promise<string | undefined> {
-  if (!isMutationTool(toolName)) {
+  if (!isMutationTool(toolName) && toolName !== 'apply_patch' && toolName !== 'move_file') {
     return undefined;
   }
 

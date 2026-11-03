@@ -134,9 +134,6 @@ export function scopedMutationTargets(toolName: string, args: Record<string, any
   const add = (value: unknown) => { if (typeof value === 'string' && value.trim()) targets.add(value.trim()); };
   for (const key of ['path', 'filePath', 'targetFile', 'TargetFile', 'AbsolutePath', 'target_path', 'file_path', 'sourcePath', 'targetPath', 'from', 'to']) add(args[key]);
   if (Array.isArray(args.targetFiles)) args.targetFiles.forEach(add);
-  if (toolName === 'apply_patch') {
-    for (const match of String(args.patch || '').matchAll(/^\*\*\* (?:Add File|Update File|Delete File|Move to):\s*(.+)$/gm)) add(match[1]);
-  }
   return [...targets];
 }
 
@@ -3590,10 +3587,8 @@ export class AgentLoop {
             const sideEffectConfig: Record<string, { reversible: boolean; checkpoint: boolean }> = {
               write_file: { reversible: true, checkpoint: true },
               replace_text: { reversible: true, checkpoint: true },
-              apply_patch: { reversible: true, checkpoint: true },
               create_file: { reversible: true, checkpoint: true },
               delete_file: { reversible: true, checkpoint: true },
-              move_file: { reversible: true, checkpoint: true },
               run_command: { reversible: false, checkpoint: true },
               git_add: { reversible: true, checkpoint: true },
               git_commit: { reversible: true, checkpoint: true },
@@ -4118,13 +4113,7 @@ export class AgentLoop {
                   && (blast.directConsumers || blast.callers).length > 0,
                 commentOnly: commentOnlyEdit,
               });
-              // ponytail: move_file is fs.rename — content identical by construction.
-              if (toolName === 'move_file' && !isToolResultFailure(executionResult.result)) {
-                this.verificationPolicy.recordContentPreservedMove(
-                  String(toolArgs?.sourcePath || ''),
-                  String(toolArgs?.targetPath || ''),
-                );
-              }
+
               const blastRisk = typeof blast?.risk === 'string' ? blast.risk.toUpperCase() : undefined;
               if (blastRisk === 'CRITICAL') this.maxEditBlastRisk = 'CRITICAL';
               else if (blastRisk === 'HIGH' && this.maxEditBlastRisk !== 'CRITICAL') this.maxEditBlastRisk = 'HIGH';
@@ -4503,7 +4492,7 @@ export class AgentLoop {
               } catch { }
             }
 
-            const isMutatingOrVerification = ['write_file', 'replace_text', 'apply_patch', 'create_file', 'delete_file', 'move_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'submit_solution'].includes(toolName)
+            const isMutatingOrVerification = ['write_file', 'replace_text', 'create_file', 'delete_file', 'write_to_file', 'replace_file_content', 'multi_replace_file_content', 'submit_solution'].includes(toolName)
               || (toolName === 'run_command' && isVerificationCommand(commandForAttribution));
             let lspPreExecutionWarning: string | undefined;
             if (isMutatingOrVerification && !isToolResultFailure(executionResult.result)) {
