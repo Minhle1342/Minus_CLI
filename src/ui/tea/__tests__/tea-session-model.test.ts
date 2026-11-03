@@ -428,3 +428,33 @@ test('ctrl+d on the only remaining tab deletes it and auto-spawns a new tab', ()
   assert.ok(cmds.some((c) => c.type === 'session-delete' && c.sessionId === 'solo-1'));
   assert.ok(cmds.some((c) => c.type === 'session-new'));
 });
+
+test('ctrl+d on middle tab deletes it and switches to adjacent next tab', () => {
+  let m = createRootModel({ width: 100, height: 24 });
+  [m] = update(meta({ sessions: ['A', 'B', 'C'], sessionIds: ['a', 'b', 'c'], session: 'B', activeSessionId: 'b' }), m);
+  assert.equal(m.sessions.tabs.length, 3);
+  assert.equal(m.sessions.activeId, 'b');
+
+  let cmds: any[];
+  [m, cmds] = update(key('ctrl+d'), m);
+
+  assert.equal(m.sessions.tabs.length, 2);
+  assert.equal(m.sessions.activeId, 'c');
+  assert.ok(cmds.some((c) => c.type === 'session-delete' && c.sessionId === 'b'));
+  assert.ok(cmds.some((c) => c.type === 'session-switch' && c.sessionId === 'c'));
+});
+
+test('ctrl+d on last tab deletes it and switches to adjacent previous tab', () => {
+  let m = createRootModel({ width: 100, height: 24 });
+  [m] = update(meta({ sessions: ['A', 'B', 'C'], sessionIds: ['a', 'b', 'c'], session: 'C', activeSessionId: 'c' }), m);
+  assert.equal(m.sessions.tabs.length, 3);
+  assert.equal(m.sessions.activeId, 'c');
+
+  let cmds: any[];
+  [m, cmds] = update(key('ctrl+d'), m);
+
+  assert.equal(m.sessions.tabs.length, 2);
+  assert.equal(m.sessions.activeId, 'b');
+  assert.ok(cmds.some((c) => c.type === 'session-delete' && c.sessionId === 'c'));
+  assert.ok(cmds.some((c) => c.type === 'session-switch' && c.sessionId === 'b'));
+});

@@ -132,3 +132,26 @@ test('Terminal Sanitizer Benchmark: Measures token reduction on simulated npm in
   // Expect > 75% reduction on large logs
   assert.ok(compressionRatio > 0.75, `Expected >75% reduction, got ${(compressionRatio * 100).toFixed(1)}%`);
 });
+
+test('Terminal Sanitizer: distillTestOutput scopes Node runner failures from massive logs', () => {
+  const lines: string[] = ['TAP version 13', '# Subtest: suite'];
+  for (let i = 1; i <= 300; i++) {
+    lines.push(`✔ test case ${i} passed (1.2ms)`);
+  }
+  lines.push('✖ failing test 301 (3.4ms)');
+  lines.push('  AssertionError [ERR_ASSERTION]: Expected 42 but got 0');
+  lines.push('    at TestContext.<anonymous> (test.ts:42:10)');
+  for (let i = 302; i <= 400; i++) {
+    lines.push(`✔ test case ${i} passed (0.8ms)`);
+  }
+  lines.push('ℹ tests 400');
+  lines.push('ℹ pass 399');
+  lines.push('ℹ fail 1');
+
+  const distilled = distillTestOutput(lines.join('\n'), 1);
+  assert.match(distilled, /\[INFO: Condensed 399 successful PASS line\(s\) of test suites\]/);
+  assert.match(distilled, /✖ failing test 301/);
+  assert.match(distilled, /AssertionError \[ERR_ASSERTION\]: Expected 42 but got 0/);
+  assert.match(distilled, /ℹ fail 1/);
+  assert.doesNotMatch(distilled, /✔ test case 1 passed/);
+});

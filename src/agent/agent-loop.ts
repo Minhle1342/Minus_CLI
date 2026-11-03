@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { ToolRegistry, ToolScope } from '../tools/registry.js';
+import { ToolRegistry, ToolScope, MODEL_HIDDEN_TOOL_NAMES, CANONICAL_MODEL_TOOL_NAMES } from '../tools/registry.js';
 import { ToolProvider } from '../tools/registry.js';
 import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
 import { validateSchemaValue } from '../tools/schema-validator.js';
@@ -1861,12 +1861,25 @@ export class AgentLoop {
               candidateProvider.getFunctionDeclarations().map((tool: any) => [tool.name, tool]),
             );
             for (const name of gateToolSurface.visibleToolNames) {
+              if (MODEL_HIDDEN_TOOL_NAMES.has(name)) continue;
               const declaration = declarationsByName.get(name);
               if (declaration && !activeToolDeclarations.some((tool: any) => tool.name === name)) {
                 activeToolDeclarations.push(declaration);
               }
             }
           }
+
+          // Filter out orchestration tools if turn has no delegation intent (saves ~8,000 tokens)
+          if (!classification.requiredCapabilities.includes('delegate')) {
+            activeToolDeclarations = activeToolDeclarations.filter(
+              (tool: any) => !isOrchestrationTool(tool.name),
+            );
+          }
+
+          // Strict filter: never declare compatibility aliases or hidden tools to model
+          activeToolDeclarations = activeToolDeclarations.filter(
+            (tool: any) => !MODEL_HIDDEN_TOOL_NAMES.has(tool.name),
+          );
 
           // Strict Phase-Based Tool Masking (Claude Code Plan Mode Pattern - Mechanism 2):
           // In explore and plan phases, mutation tools are withheld from model-visible schemas so the LLM physically cannot mutate

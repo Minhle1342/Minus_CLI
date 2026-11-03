@@ -505,24 +505,24 @@ export function getModelTokenProfile(modelName: string, baseURL?: string): Model
 export function resolveTokenConfig(modelName: string, userConfig?: Partial<TokenConfig>, baseURL?: string): TokenConfig {
   const profile = getModelTokenProfile(modelName, baseURL);
 
-  let maxOutputTokens = userConfig?.maxOutputTokens ?? profile.defaultMaxOutputTokens;
+  let maxOutputTokens = userConfig?.maxOutputTokens ?? profile.maxSupportedOutputTokens ?? profile.defaultMaxOutputTokens;
   if (profile.maxSupportedOutputTokens && maxOutputTokens > profile.maxSupportedOutputTokens) {
     maxOutputTokens = profile.maxSupportedOutputTokens;
   }
 
-  let maxInputTokens = userConfig?.maxInputTokens ?? profile.defaultMaxInputTokens;
+  let maxInputTokens = userConfig?.maxInputTokens ?? profile.maxSupportedInputTokens ?? profile.defaultMaxInputTokens;
   if (profile.maxSupportedInputTokens && maxInputTokens > profile.maxSupportedInputTokens) {
     maxInputTokens = profile.maxSupportedInputTokens;
   }
 
   let thinkingBudget = userConfig?.thinkingBudget;
   if (thinkingBudget === undefined && profile.supportsThinkingBudget) {
-    thinkingBudget = profile.isReasoningModel ? 4096 : undefined;
+    thinkingBudget = profile.isReasoningModel ? 64000 : undefined;
   }
 
   const reasoningEffort = userConfig?.reasoningEffort ?? (profile.supportsReasoningEffort ? 'medium' : undefined);
   const includeThoughts = userConfig?.includeThoughts ?? true;
-  const dynamicContextBudget = userConfig?.dynamicContextBudget ?? (process.env.MINUS_DYNAMIC_CONTEXT_BUDGET ? parseInt(process.env.MINUS_DYNAMIC_CONTEXT_BUDGET, 10) : undefined);
+  const dynamicContextBudget = userConfig?.dynamicContextBudget ?? (process.env.MINUS_DYNAMIC_CONTEXT_BUDGET ? parseInt(process.env.MINUS_DYNAMIC_CONTEXT_BUDGET, 10) : 8000);
 
   return {
     maxOutputTokens,
@@ -607,9 +607,9 @@ export const TOKEN_TIER_DEFINITIONS: Record<TokenPresetTier, TokenTierDefinition
 export function normalizePresetTier(input: string): TokenPresetTier | null {
   const clean = (input || '').toLowerCase().trim();
   if (clean === 'low' || clean === 'min' || clean === 'eco' || clean === 'fast' || clean === '1') return 'low';
-  if (clean === 'medium' || clean === 'med' || clean === 'mid' || clean === 'balanced' || clean === 'default' || clean === '2') return 'medium';
+  if (clean === 'medium' || clean === 'med' || clean === 'mid' || clean === 'balanced' || clean === '2') return 'medium';
   if (clean === 'high' || clean === 'deep' || clean === 'heavy' || clean === 'pro' || clean === '3') return 'high';
-  if (clean === 'max' || clean === 'maximum' || clean === 'full' || clean === 'unlimited' || clean === '4') return 'max';
+  if (clean === 'max' || clean === 'maximum' || clean === 'full' || clean === 'unlimited' || clean === 'default' || clean === '4') return 'max';
   return null;
 }
 

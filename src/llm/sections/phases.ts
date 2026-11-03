@@ -43,6 +43,7 @@ export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VER
 - Scope: run the tests/scenarios covering the code just changed (pick by changed files / blast radius); skip unrelated suites. Widen to the full suite only when the risk or the user requires it.
 - Verification Tools:
   * Use \`run_command\` to run the applicable build or test check (e.g. \`npm run build\`, \`tsc\`, \`npm test\`, \`cargo test\`, \`pytest\`).
+  * Scoped Test Execution: For test commands, scope directly to affected test files or test name patterns (e.g. \`node --test path/to/file.test.ts\`, \`npm test -- -t "test name"\`, \`pytest -k "test_name"\`) or use fail-fast flags (\`--bail\`, \`--onlyFailures\`, \`--reporter=min\`) to isolate failures cleanly without drowning in passing log spam.
   * Use \`run_command "git diff"\` to inspect working tree changes.
 - Completion: Report clear evidence of the check actually run and the observed diff.`;
 

@@ -2066,19 +2066,21 @@ Please focus on executing and verifying this task, and report it complete only a
             }
           } else if (action === 'delete' && targetId) {
             try {
-              const existing = await kernel.ctx.sessions.load(targetId);
-              if (existing && existing.seq > 0) {
-                console.log(`\n${c.yellow}Giữ lại session:${c.reset} ${targetId} (còn ${existing.seq} events) — chỉ ẩn tab, không xóa file.\n`);
-              } else {
-                const removed = await kernel.ctx.sessions.remove(targetId);
-                if (removed) {
-                  agentLoop.evictSessionState(targetId);
-                  kernel.ctx.permissions.evictSessionApprovals(targetId);
+              const removed = await kernel.ctx.sessions.remove(targetId);
+              if (removed) {
+                agentLoop.evictSessionState(targetId);
+                kernel.ctx.permissions.evictSessionApprovals(targetId);
+                if (activeSession.id === targetId) {
+                  const created = await kernel.ctx.sessions.create();
+                  activeSession = created;
+                  agentLoop.bindSession(activeSession);
+                  saveSession({ activeSessionId: activeSession.id });
+                  tui?.adoptSession(activeSession.id);
                 }
-                console.log(removed
-                  ? `\n${c.green}✔ Đã xóa vĩnh viễn session:${c.reset} ${targetId} (chưa có nội dung)\n`
-                  : `\n${c.gray}Session không tồn tại:${c.reset} ${targetId}\n`);
               }
+              console.log(removed
+                ? `\n${c.green}✔ Đã xóa vĩnh viễn session:${c.reset} ${targetId}\n`
+                : `\n${c.gray}Session không tồn tại:${c.reset} ${targetId}\n`);
             } catch (err: any) {
               console.error(`\n${c.red}✖ Không xóa được session:${c.reset}`, err.message);
             }

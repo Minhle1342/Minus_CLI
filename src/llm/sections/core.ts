@@ -11,6 +11,7 @@ import {
   SECTION_FRONTEND_UI,
   SECTION_GIT_OPERATIONS,
   SECTION_TOOL_PLAYBOOKS,
+  SECTION_PATCH_FORMAT_SPEC,
 } from './tools.js';
 import {
   SECTION_TABULAR_OUTPUT,
@@ -39,6 +40,10 @@ export interface PromptAssemblyContext {
   includeStaticCodebaseIntelligence?: boolean;
   /** Keep static Task Orchestrator section. Gated AgentLoop requests can defer to dynamic tail. */
   includeStaticTaskOrchestrator?: boolean;
+  /** Keep static Git operations section. */
+  includeStaticGitOperations?: boolean;
+  /** Keep static Unified Diff section. */
+  includeStaticPatchFormatSpec?: boolean;
 
 
   // Polyglot & Monorepo Fingerprinting
@@ -232,7 +237,10 @@ export function detectPromptContext(
   }
 
   const hasComputerTool = toolNames.includes('computer');
-  const hasGitTools = toolNames.length === 0 || toolNames.includes('run_command');
+  const hasGitIntent = !request || Boolean(request && /\b(git|commit|push|pull|branch|stash|merge|rebase|checkout|diff|log|status)\b/i.test(request));
+  const hasGitTools = toolNames.some((name) => name.startsWith('git_')) || (toolNames.includes('run_command') && hasGitIntent);
+  const hasEditIntent = Boolean(request && /\b(edit|modify|change|patch|replace|update|fix|refactor|write|them|sua|thay the|cap nhat)\b/i.test(request));
+  const includeStaticPatchFormatSpec = toolNames.some((t) => ['replace_text', 'write_file'].includes(t)) && hasEditIntent;
   const hasSubagentTools = toolNames.some((name) => name.includes('subagent') || name === 'allocate_agent_task');
   const hasAntigravityTools = toolNames.length === 0 || toolNames.some((name) => ['run_command', 'web_search', 'web_fetch'].includes(name));
   const hasCodebaseTools = toolNames.length === 0 || toolNames.some((name) => ['list_files', 'read_file', 'search_text'].includes(name));
@@ -252,6 +260,7 @@ export function detectPromptContext(
     isGo: cachedProject.isGo,
     hasComputerTool,
     hasGitTools,
+    includeStaticPatchFormatSpec,
     hasSubagentTools,
     hasAntigravityTools,
     hasCodebaseTools,
@@ -404,14 +413,21 @@ export const DEFAULT_PROMPT_SECTIONS: DefaultPromptSection[] = [
     content: SECTION_GIT_OPERATIONS,
     priority: 100,
     tier: 'T1',
-    condition: (ctx: PromptAssemblyContext) => ctx.hasGitTools ?? true,
+    condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticGitOperations ?? true) && (ctx.hasGitTools ?? false),
+  },
+  {
+    id: 'patch-format-spec',
+    content: SECTION_PATCH_FORMAT_SPEC,
+    priority: 150,
+    tier: 'T1',
+    condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticPatchFormatSpec ?? false),
   },
   {
     id: 'frontend-ui',
     content: SECTION_FRONTEND_UI,
     priority: 200,
     tier: 'T1',
-    condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticFrontendUI ?? true) && (ctx.isFrontend ?? false),
+    condition: (ctx: PromptAssemblyContext) => (ctx.includeStaticFrontendUI ?? true) && (ctx.isFrontend ?? false) && (ctx.request ? needsFrontendGuidance(ctx.request, undefined, ctx.isFrontend) : true),
   },
   { id: 'antigravity-tools', content: SECTION_ANTIGRAVITY_TOOLS, priority: 300, tier: 'T1', condition: (ctx: PromptAssemblyContext) => ctx.hasAntigravityTools ?? true },
   {

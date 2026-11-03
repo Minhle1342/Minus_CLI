@@ -1314,7 +1314,10 @@ export function deleteTab(model: RootModel, index: number): [RootModel, Cmd[]] {
     }, cmds];
   }
   const visible = tabs.filter(t => !t.hidden);
-  const fallback = visible[Math.min(state.selected, Math.max(0, visible.length - 1))] || tabs[0];
+  const targetPos = Math.max(0, state.tabs.filter(t => !t.hidden).findIndex(t => t.id === target.id));
+  const fallback = target.id === state.activeId
+    ? (visible[Math.min(targetPos, Math.max(0, visible.length - 1))] || tabs[0])
+    : (visible.find(t => t.id === state.activeId) || visible[Math.min(targetPos, Math.max(0, visible.length - 1))] || tabs[0]);
   const cmds: Cmd[] = [];
   if (fallback.id !== state.activeId && !fallback.subagent) cmds.push({ type: 'session-switch', sessionId: fallback.id });
   if (!target.subagent) cmds.push({ type: 'session-delete', sessionId: target.id });

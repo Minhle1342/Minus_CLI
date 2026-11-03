@@ -104,7 +104,7 @@ export function distillTestOutput(text: string, exitCode?: number): string {
   if (lines.length <= 80) return text;
 
   const isPassingTestPattern = (line: string): boolean => {
-    return /^(?:PASS|✓|SUCCESS|ok)\s+/i.test(line.trim());
+    return /^(?:PASS|✓|✔|SUCCESS|ok|﹣)\s+/i.test(line.trim());
   };
 
   const distilled: string[] = [];
@@ -118,11 +118,53 @@ export function distillTestOutput(text: string, exitCode?: number): string {
     distilled.push(line);
   }
 
-  if (skippedPassCount > 0) {
-    distilled.unshift(`[INFO: Condensed ${skippedPassCount} successful PASS line(s) of test suites]`);
+  let resultLines = distilled;
+
+  // Error-Centric Slicing: If log is still long, slice around failure anchors
+  const isFailureAnchor = (line: string): boolean => {
+    return /(?:✖|FAIL|FAILED|AssertionError|ERR_ASSERTION|Traceback|UnhandledPromiseRejection|failures?:|failing tests:)/i.test(line);
+  };
+
+  if (resultLines.length > 60) {
+    const failureIndices: number[] = [];
+    for (let i = 0; i < resultLines.length; i++) {
+      if (isFailureAnchor(resultLines[i])) {
+        failureIndices.push(i);
+      }
+    }
+
+    if (failureIndices.length > 0) {
+      const selected = new Set<number>();
+      for (let i = 0; i < Math.min(5, resultLines.length); i++) selected.add(i);
+      for (let i = Math.max(0, resultLines.length - 15); i < resultLines.length; i++) selected.add(i);
+      for (const idx of failureIndices) {
+        const start = Math.max(0, idx - 3);
+        const end = Math.min(resultLines.length, idx + 35);
+        for (let i = start; i < end; i++) selected.add(i);
+      }
+
+      const sortedIndices = Array.from(selected).sort((a, b) => a - b);
+      const sliced: string[] = [];
+      let lastIdx = -1;
+      for (const idx of sortedIndices) {
+        if (lastIdx !== -1 && idx > lastIdx + 1) {
+          sliced.push(`[... Omitted ${idx - lastIdx - 1} non-failure lines ...]`);
+        }
+        sliced.push(resultLines[idx]);
+        lastIdx = idx;
+      }
+      resultLines = sliced;
+    }
   }
 
-  return distilled.join('\n');
+  if (skippedPassCount > 0) {
+    resultLines.unshift(`[INFO: Condensed ${skippedPassCount} successful PASS line(s) of test suites]`);
+    return resultLines.join('\n');
+  }
+
+  return resultLines.join('\n');
+
+
 }
 
 /**
