@@ -14,6 +14,7 @@ export interface ToolDescriptor {
 }
 
 const ALL_PHASES: TaskPhase[] = ['explore', 'plan', 'implement', 'verify', 'release'];
+
 export const READ_TOOL_NAMES = new Set([
   'read_file',
   'list_files',
@@ -28,9 +29,6 @@ export const READ_TOOL_NAMES = new Set([
   'get_route_map',
   'get_symbol_context_360',
   'get_architecture_topology',
-  'read_compressed_code',
-  'pack_codebase',
-  'inspect_image',
   'codegraph_explore',
   'codegraph_node',
   'codegraph_search',
@@ -38,9 +36,8 @@ export const READ_TOOL_NAMES = new Set([
   'codegraph_callees',
   'codegraph_impact',
   'codegraph_status',
-  'session_diff',
-  'list_skills',
 ]);
+
 export const EDIT_TOOL_NAMES = new Set([
   'replace_text',
   'write_file',
@@ -50,6 +47,7 @@ export const EDIT_TOOL_NAMES = new Set([
   'replace_file_content',
   'multi_replace_file_content',
 ]);
+
 export const TOOL_SETS = { READ: READ_TOOL_NAMES, EDIT: EDIT_TOOL_NAMES };
 const READ = READ_TOOL_NAMES;
 const EDIT = EDIT_TOOL_NAMES;
@@ -66,17 +64,9 @@ export class ToolDescriptorRegistry {
     let descriptor: ToolDescriptor;
 
     if (READ.has(name)) {
-      let capabilities: Capability[] = ['inspect', 'search'];
-      if (name === 'get_diagnostics') {
-        capabilities = ['inspect', 'verify'];
-      } else if (name === 'lsp_query') {
-        capabilities = ['inspect', 'search', 'verify'];
-      } else if (name === 'analyze_impact' || name === 'codegraph_impact') {
-        capabilities = ['inspect', 'search', 'plan'];
-      }
       descriptor = {
         name,
-        capabilities,
+        capabilities: ['inspect', 'search'],
         phases: ALL_PHASES,
         minimumRisk: 'R0',
         mutates: false,
@@ -97,20 +87,7 @@ export class ToolDescriptorRegistry {
         deferLoading: false,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'verify_edit') {
-      descriptor = {
-        name,
-        capabilities: ['verify', 'edit', 'inspect'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: false,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'run_command' || name === 'git_command') {
-      // run_command hỗ trợ tra cứu chẩn đoán an toàn ở R0 (git log, status, inspect) và thực thi lệnh
+    } else if (name === 'run_command') {
       descriptor = {
         name,
         capabilities: ['inspect', 'search', 'execute', 'verify', 'git-read', 'git-write'],
@@ -119,18 +96,6 @@ export class ToolDescriptorRegistry {
         mutates: false,
         reversible: false,
         requiresApproval: true,
-        deferLoading: false,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'run_test_suite') {
-      descriptor = {
-        name,
-        capabilities: ['verify', 'execute', 'inspect'],
-        phases: ['explore', 'implement', 'verify', 'release'],
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
         deferLoading: false,
         schemaCost: this.cost(tool),
       };
@@ -158,35 +123,11 @@ export class ToolDescriptorRegistry {
         deferLoading: false,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'report_investigation_findings') {
-      descriptor = {
-        name,
-        capabilities: ['inspect', 'verify', 'complete'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: false,
-        schemaCost: this.cost(tool),
-      };
     } else if (name === 'formulate_and_verify_hypothesis') {
       descriptor = {
         name,
         capabilities: ['inspect', 'verify', 'plan'],
         phases: ['explore', 'plan', 'implement', 'verify'],
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: false,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'discover_tools') {
-      descriptor = {
-        name,
-        capabilities: ['inspect', 'search'],
-        phases: ALL_PHASES,
         minimumRisk: 'R0',
         mutates: false,
         reversible: true,
@@ -206,17 +147,15 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'manage_task' || name === 'start_background_task' || name === 'get_task_output' || name === 'stop_task' || name === 'schedule') {
-      const isOutput = name === 'get_task_output';
-      const isSched = name === 'schedule';
+    } else if (name === 'manage_task') {
       descriptor = {
         name,
-        capabilities: isSched ? ['execute', 'plan'] : isOutput ? ['inspect', 'execute', 'verify'] : ['execute', 'inspect'],
+        capabilities: ['execute', 'inspect'],
         phases: ALL_PHASES,
-        minimumRisk: isOutput ? 'R0' : 'R1',
-        mutates: !isOutput,
-        reversible: isSched || isOutput,
-        requiresApproval: !isOutput,
+        minimumRisk: 'R1',
+        mutates: true,
+        reversible: false,
+        requiresApproval: false,
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
@@ -256,7 +195,7 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'delegate_task' || name === 'delegate_agent' || name === 'spawn_agent' || name === 'wait_agent' || name === 'get_agent_result' || name === 'stop_agent' || name === 'resume_agent') {
+    } else if (name === 'spawn_agent' || name === 'wait_agent' || name === 'get_agent_result' || name === 'stop_agent' || name === 'resume_agent') {
       const isReadOnly = name === 'wait_agent' || name === 'get_agent_result';
       descriptor = {
         name,
@@ -269,43 +208,7 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'read_shared_context') {
-      descriptor = {
-        name,
-        capabilities: ['inspect', 'delegate'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'write_shared_context' || name === 'publish_agent_event') {
-      descriptor = {
-        name,
-        capabilities: ['delegate', 'edit'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R1',
-        mutates: true,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'request_approval') {
-      descriptor = {
-        name,
-        capabilities: ['plan', 'delegate', 'execute'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'ask_user' || name === 'ask_question') {
+    } else if (name === 'ask_user') {
       descriptor = {
         name,
         capabilities: ['plan', 'inspect'],
@@ -315,56 +218,6 @@ export class ToolDescriptorRegistry {
         reversible: true,
         requiresApproval: false,
         deferLoading: false,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name.startsWith('compose_') || name === 'generate_spec' || name === 'lock_spec' || name === 'verify_spec_matrix') {
-      descriptor = {
-        name,
-        capabilities: ['plan', 'inspect', 'verify', 'complete'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'run_code_review' || name === 'get_code_review_status' || name === 'request_review' || name === 'submit_review') {
-      descriptor = {
-        name,
-        capabilities: name === 'submit_review' ? ['verify', 'complete'] : ['verify', 'inspect'],
-        phases: ['implement', 'verify', 'release'],
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'list_worktrees' || name === 'create_worktree' || name === 'remove_worktree') {
-      const isRead = name === 'list_worktrees';
-      descriptor = {
-        name,
-        capabilities: isRead ? ['git-read', 'inspect'] : ['git-write', 'execute'],
-        phases: isRead ? ALL_PHASES : ['plan', 'implement', 'verify', 'release'],
-        minimumRisk: isRead ? 'R0' : 'R1',
-        mutates: !isRead,
-        reversible: isRead,
-        requiresApproval: !isRead,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name.startsWith('git_')) {
-      const readOnly = /(?:status|diff|log|show|list_commands)/.test(name);
-      descriptor = {
-        name,
-        capabilities: [readOnly ? 'git-read' : 'git-write', 'inspect'],
-        phases: readOnly ? ALL_PHASES : ['implement', 'release'],
-        minimumRisk: readOnly ? 'R0' : 'R2',
-        mutates: !readOnly,
-        reversible: name !== 'git_push',
-        requiresApproval: !readOnly,
-        deferLoading: true,
         schemaCost: this.cost(tool),
       };
     } else if (/web|url/.test(name)) {
@@ -379,45 +232,7 @@ export class ToolDescriptorRegistry {
         deferLoading: true,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'update_plan_task') {
-      descriptor = {
-        name,
-        capabilities: ['plan', 'inspect', 'edit', 'verify'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (/plan|task/.test(name)) {
-      descriptor = {
-        name,
-        capabilities: ['plan', 'inspect', 'edit'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (/memory/.test(name)) {
-      const isVerify = name === 'verify_repository_memory';
-      const savesMemory = name.startsWith('save_');
-      descriptor = {
-        name,
-        capabilities: isVerify ? ['memory', 'verify', 'inspect'] : savesMemory ? ['memory', 'edit'] : ['memory', 'inspect', 'search'],
-        phases: ALL_PHASES,
-        minimumRisk: savesMemory ? 'R1' : 'R0',
-        mutates: savesMemory,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (/agent|shared_context/.test(name)) {
+    } else if (/agent/.test(name)) {
       descriptor = {
         name,
         capabilities: ['delegate', 'execute'],
@@ -425,19 +240,6 @@ export class ToolDescriptorRegistry {
         minimumRisk: 'R1',
         mutates: true,
         reversible: false,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name.startsWith('game_') || name.startsWith('unity_')) {
-      const mutates = /write|create|scaffold|compose|assemble|wire|execute/.test(name);
-      descriptor = {
-        name,
-        capabilities: mutates ? ['edit', 'execute'] : ['inspect', 'plan'],
-        phases: ['explore', 'plan', 'implement', 'verify'],
-        minimumRisk: mutates ? 'R1' : 'R0',
-        mutates,
-        reversible: true,
         requiresApproval: false,
         deferLoading: true,
         schemaCost: this.cost(tool),
@@ -453,46 +255,6 @@ export class ToolDescriptorRegistry {
         reversible: true,
         requiresApproval: true,
         deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'generate_image') {
-      // Nano Banana text-to-image: network call with cost, writes a new asset
-      // file into the workspace. Deletable afterwards, so reversible.
-      descriptor = {
-        name,
-        capabilities: ['network', 'execute'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R1',
-        mutates: true,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name.startsWith('rea_')) {
-      // REA reads a binary via Hopper; it never writes the workspace, so treat it
-      // as read-only or the explore/plan gate would deny it.
-      descriptor = {
-        name,
-        capabilities: ['inspect', 'search'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: true,
-        schemaCost: this.cost(tool),
-      };
-    } else if (name === 'load_workspace_skills') {
-      descriptor = {
-        name,
-        capabilities: ['execute', 'inspect'],
-        phases: ALL_PHASES,
-        minimumRisk: 'R0',
-        mutates: false,
-        reversible: true,
-        requiresApproval: false,
-        deferLoading: false,
         schemaCost: this.cost(tool),
       };
     } else {
@@ -513,7 +275,6 @@ export class ToolDescriptorRegistry {
   }
 
   private cost(tool: ToolDefinition): number {
-    // Tool lạ (không có trong provider) được mô tả bằng `{ name }` — thiếu description/parameters.
     const description = tool.description || '';
     const params = JSON.stringify(tool.parameters || {}) || '';
     return Math.max(1, Math.ceil((tool.name.length + description.length + params.length) / 4));

@@ -13,19 +13,30 @@ import {
 import { Workspace } from '../workspace/workspace.js';
 
 test('auto execution refuses a Docker-to-local downgrade for a mutating command', async () => {
-  const tool = createRunCommandTool({
-    getStatus: () => ({
-      mode: 'local', activeProvider: 'Local Process Sandbox', isIsolated: false,
-      dockerAvailable: false, fallbackToLocal: true,
-    }),
-    exec: async () => { throw new Error('must not execute'); },
-  } as any);
-  const result = await tool.execute({ command: 'npm install malicious-pkg' }, new Workspace());
-  assert.equal(result.commandOutcome, 'blocked_preflight');
-  assert.equal(result.preflightCode, 'ISOLATED_SANDBOX_REQUIRED');
-  assert.equal(result.errorCode, 'ISOLATED_SANDBOX_REQUIRED');
-  assert.ok(result.error);
-  assert.equal(result.processStarted, false);
+  const prevFallback = process.env.MINUS_ALLOW_HOST_FALLBACK;
+  const prevDisable = process.env.MINUS_DISABLE_DOCKER_ISOLATION;
+  process.env.MINUS_ALLOW_HOST_FALLBACK = '0';
+  process.env.MINUS_DISABLE_DOCKER_ISOLATION = '0';
+  try {
+    const tool = createRunCommandTool({
+      getStatus: () => ({
+        mode: 'local', activeProvider: 'Local Process Sandbox', isIsolated: false,
+        dockerAvailable: false, fallbackToLocal: true,
+      }),
+      exec: async () => { throw new Error('must not execute'); },
+    } as any);
+    const result = await tool.execute({ command: 'npm install malicious-pkg' }, new Workspace());
+    assert.equal(result.commandOutcome, 'blocked_preflight');
+    assert.equal(result.preflightCode, 'ISOLATED_SANDBOX_REQUIRED');
+    assert.equal(result.errorCode, 'ISOLATED_SANDBOX_REQUIRED');
+    assert.ok(result.error);
+    assert.equal(result.processStarted, false);
+  } finally {
+    if (prevFallback === undefined) delete process.env.MINUS_ALLOW_HOST_FALLBACK;
+    else process.env.MINUS_ALLOW_HOST_FALLBACK = prevFallback;
+    if (prevDisable === undefined) delete process.env.MINUS_DISABLE_DOCKER_ISOLATION;
+    else process.env.MINUS_DISABLE_DOCKER_ISOLATION = prevDisable;
+  }
 });
 
 test('auto execution allows test and build commands during Docker downgrade', async () => {

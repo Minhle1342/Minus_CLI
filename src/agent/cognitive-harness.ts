@@ -281,7 +281,7 @@ export class CognitiveHarness {
         ...scaffold.negativeGate,
       ],
       executionTopology: [
-        'Attachment Neighborhood Expansion: inspect hop-1 files (direct imports, importers, dir top-ranked files listed in [Attachment Neighborhood]) then hop-2 files (related to hop-1) with read_file / grep_search / analyze_impact before concluding.',
+        'Attachment Neighborhood Expansion: inspect hop-1 files (direct imports, importers, dir top-ranked files listed in [Attachment Neighborhood]) then hop-2 files (related to hop-1) with read_file / search_text before concluding.',
         ...scaffold.executionTopology,
       ],
     };
@@ -503,14 +503,14 @@ export class CognitiveHarness {
           premiseCheck: activeTask
             ? `Verify plan alignment for task: "${activeTask}". Ensure steps decompose root cause resolution.`
             : 'Formulate a comprehensive plan with atomic, ordered, testable steps before unlocking implementation.',
-          falsificationCriteria: 'If the plan misses edge cases, architectural invariants, or verification steps, the plan is INCOMPLETE and must be refined with create_plan / update_plan_task.',
+          falsificationCriteria: 'If the plan misses edge cases, architectural invariants, or verification steps, the plan is INCOMPLETE and must be refined before execution.',
           executionTopology: [
-            'Step 1 (Architectural Inspection): Inspect relevant files and references using read-only tools (read_file, list_files, grep_search).',
+            'Step 1 (Architectural Inspection): Inspect relevant files and references using read-only tools (read_file, list_files, search_text).',
             'Step 2 (Scope & Dependency Mapping): Identify exact file boundaries, caller impact, and technical constraints.',
             'Step 3 (Plan Formalization): Use create_plan to define ordered, atomic subtasks with concrete acceptance criteria.',
             'Step 4 (Phase Transition Readiness): Once plan is accepted and locked, transition to explore or implement phase.',
           ],
-          actionBoundary: 'Strictly READ-ONLY and PLANNING actions (read_file, list_files, grep_search, create_plan, update_plan_task). Code editing tools are FORBIDDEN.',
+          actionBoundary: 'Strictly READ-ONLY and PLANNING actions (read_file, list_files, search_text). Code editing tools are FORBIDDEN.',
         };
       }
 

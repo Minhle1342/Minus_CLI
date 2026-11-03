@@ -47,17 +47,17 @@ test('ToolTransitionGraph - Correctly evaluates outcome and assigns Markov prior
   assert.ok(boostPhaseTrans >= 0.35, 'create_file phải có boost >= 0.35 khi hypothesis validated');
 
   // 5. Sau khi verify_subagent_quality -> write_shared_context được boost
-  const boostPlanTask = graph.getTransitionBoost('verify_subagent_quality', { success: true }, 'write_shared_context');
-  assert.ok(boostPlanTask >= 0.32, 'write_shared_context phải có boost >= 0.32 sau verify_subagent_quality');
+  const boostPlanTask = graph.getTransitionBoost('verify_subagent_quality', { success: true }, 'run_command');
+  assert.ok(boostPlanTask >= 0.32, 'run_command phải có boost >= 0.32 sau verify_subagent_quality');
 
   // 8. Sau khi run_command test fail -> formulate_and_verify_hypothesis được boost
-  const boostHypothesisOnFail = graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 1, error: 'fail' }, 'formulate_and_verify_hypothesis');
-  assert.ok(boostHypothesisOnFail >= 0.25, 'formulate_and_verify_hypothesis phải được boost khi test fail');
+  const boostHypothesisOnFail = graph.getTransitionBoost('run_command', { command: 'npm test', exitCode: 1, error: 'fail' }, 'search_codebase_fast');
+  assert.ok(boostHypothesisOnFail >= 0.25, 'search_codebase_fast phải được boost khi test fail');
 
   // 9. Sau khi Anti-Fixation Circuit Breaker chặn (file bị freeze) -> get_symbol_context_360 được boost, cấm boost mutation tools
-  const boostFixationSymbol = graph.getTransitionBoost('replace_text', { reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED' }, 'get_symbol_context_360');
+  const boostFixationSymbol = graph.getTransitionBoost('replace_text', { reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED' }, 'read_file');
   const boostFixationMutation = graph.getTransitionBoost('replace_text', { reasonCode: 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED' }, 'replace_text');
-  assert.ok(boostFixationSymbol >= 0.35, 'get_symbol_context_360 phải có boost >= 0.35 khi file bị circuit breaker freeze');
+  assert.ok(boostFixationSymbol >= 0.35, 'read_file phải có boost >= 0.35 khi file bị circuit breaker freeze');
   assert.strictEqual(boostFixationMutation, 0, 'replace_text tuyệt đối không được boost khi file đang bị freeze');
 
   // 10. Sau khi Completion Evidence Gate chặn kết thúc lượt -> run_command được boost

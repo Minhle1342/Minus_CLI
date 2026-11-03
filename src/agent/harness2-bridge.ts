@@ -495,30 +495,26 @@ export class Harness2RecursiveEngine {
       replace_text: isPlan
         ? '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Code modifications are strictly prohibited during the Plan phase. Survey, inspect, and plan ONLY.'
         : isImplement
-        ? '[PREREQUISITES REQUIRED] Perform surgical atomic substring replacement. MUST inspect exact lines via read_file immediately prior to mutation. MUST pass expectedFileHash. MUST immediately verify via get_diagnostics post-mutation.'
+        ? '[PREREQUISITES REQUIRED] Perform surgical atomic substring replacement. MUST inspect exact lines via read_file immediately prior to mutation. MUST pass expectedFileHash. MUST immediately verify via run_command test suites post-mutation.'
         : 'Perform surgical atomic substring replacement. Target content must be unique within the specified line range. Always specify leading whitespace exactly.',
 
-      apply_patch: isPlan
-        ? '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Applying code patches is strictly prohibited during the Plan phase. Complete architectural planning first.'
-        : isImplement
-        ? 'Apply unified diff patch hunks (--- a/<path> +++ b/<path> @@ -start,count +start,count @@). Context lines prefix with space, deletions with -, additions with +. Always inspect git diff and compiler diagnostics after applying.'
-        : 'Apply multi-line unified diff patches. Fuzz 0-2 auto-resolved. Inspect file with read_file if fuzz candidate conflict occurs.',
+      write_file: isPlan
+        ? '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Creating or overwriting files is strictly prohibited during the Plan phase. Complete architectural planning first.'
+        : 'Write full file contents atomically. Prefer replace_text for surgical updates to existing files. Use write_file only for new files or complete overwrites.',
+
+      list_files: 'List files and directories in workspace. Use path "." for root. Essential for discovering project structure and locating config files.',
+
+      search_text: 'Search for text strings or regex patterns across workspace files. Fast code search without full graph index.',
+
+      delete_file: 'Delete a file permanently from workspace. Use with caution; never delete files without explicit user intent.',
 
       run_command: isPlan
         ? 'Execute read-only commands (e.g. git status, git log, directory listings). Mutating commands or running test suites to force premature changes is discouraged.'
         : 'Execute terminal build, test, and lint commands (e.g. npm test, npx jest, cargo test, pytest). Run fast commands (<5s) synchronously (WaitMsBeforeAsync=5000). Proactively launch servers in background. Avoid polling sleeps.',
 
-      get_diagnostics: 'Query Language Server Protocol (LSP) diagnostics and TypeScript compiler errors for workspace files. Mandatory check immediately following any code edit to verify 0 errors before proceeding.',
+      web_search: 'Search Google for external documentation, API references, error messages, and package specifications.',
 
-      codegraph_explore: 'Explore codebase architecture, symbol hierarchies, call graphs, and dependency routes using pre-indexed knowledge graph. Always survey upstream callers before planning changes.',
-
-      analyze_impact: 'Quantify blast radius and impacted execution flows before modifying function signatures, interfaces, or exported modules. Report callers, processes, and risk level.',
-
-      create_plan: isPlan
-        ? 'Decompose architectural scope into 2-5 verifiable DAG milestones with explicit dependsOn dependencies and concrete acceptance criteria.'
-        : 'Define or refine execution milestones with verifiable acceptance criteria. Mark milestones as completed only after empirical verification.',
-
-      submit_solution: 'Final completion gateway. Validates all milestones, passes reproduction test, and confirms clean test suite exit code 0. FORBIDDEN to call with fake mocks or unverified assertions.',
+      web_fetch: 'Fetch and parse text content from URLs or GitHub repositories for up-to-date documentation.',
 
       spawn_agent: 'Launch background reconnaissance scout or specialist subagents for parallel exploration without lock conflicts or shared state pollution.',
     };

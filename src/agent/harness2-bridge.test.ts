@@ -295,7 +295,7 @@ test('Harness2RecursiveEngine - Generate standard tool guidance catalog for core
   const catalog = (engine as any).generateStandardToolGuidanceCatalog();
 
   // Must cover core tools
-  const coreTools = ['read_file', 'replace_text', 'apply_patch', 'run_command', 'get_diagnostics', 'codegraph_explore', 'analyze_impact', 'create_plan', 'submit_solution', 'spawn_agent'];
+  const coreTools = ['read_file', 'replace_text', 'write_file', 'list_files', 'search_text', 'delete_file', 'run_command', 'web_search', 'web_fetch', 'spawn_agent'];
   for (const tool of coreTools) {
     assert.ok(catalog[tool], `Catalog must contain guidance for ${tool}`);
     assert.ok(catalog[tool].length > 30, `Guidance for ${tool} must be informative`);
@@ -307,12 +307,12 @@ test('Harness2RecursiveEngine - Generate phase-differentiated tool guidance', ()
   
   const planCatalog = (engine as any).generateStandardToolGuidanceCatalog({ phase: 'plan' });
   assert.ok(planCatalog.replace_text.includes('PHASE LOCK') || planCatalog.replace_text.includes('FORBIDDEN'));
-  assert.ok(planCatalog.apply_patch.includes('PHASE LOCK') || planCatalog.apply_patch.includes('FORBIDDEN'));
+  assert.ok(planCatalog.write_file.includes('PHASE LOCK') || planCatalog.write_file.includes('FORBIDDEN'));
   assert.ok(planCatalog.read_file.includes('primary') || planCatalog.read_file.includes('Survey') || planCatalog.read_file.includes('Inspect') || planCatalog.read_file.includes('read-only'));
 
   const implCatalog = (engine as any).generateStandardToolGuidanceCatalog({ phase: 'implement' });
-  assert.ok(implCatalog.replace_text.includes('read_file') || implCatalog.replace_text.includes('get_diagnostics') || implCatalog.replace_text.includes('PREREQUISITE'));
-  assert.ok(implCatalog.apply_patch.includes('diff') || implCatalog.apply_patch.includes('patch') || implCatalog.apply_patch.includes('hunk'));
+  assert.ok(implCatalog.replace_text.includes('read_file') || implCatalog.replace_text.includes('run_command') || implCatalog.replace_text.includes('PREREQUISITE'));
+  assert.ok(implCatalog.write_file.includes('Write') || implCatalog.write_file.includes('write') || implCatalog.write_file.includes('contents'));
 });
 
 test('Harness2RecursiveEngine - Propose candidates with specialized tool guidance', () => {
@@ -376,8 +376,8 @@ test('Harness2RecursiveEngine - Export and import comprehensive tool description
     assert.ok(exportedFiles.length >= 10, `Expected at least 10 tool descriptions, found ${exportedFiles.length}`);
     assert.ok(exportedFiles.includes('read_file.md'));
     assert.ok(exportedFiles.includes('replace_text.md'));
-    assert.ok(exportedFiles.includes('apply_patch.md'));
-    assert.ok(exportedFiles.includes('get_diagnostics.md'));
+    assert.ok(exportedFiles.includes('write_file.md'));
+    assert.ok(exportedFiles.includes('run_command.md'));
 
     const imported = await engine.importBundleFromDirectory(tmpDir);
     assert.strictEqual(Object.keys(imported.toolGuidance).length, exportedFiles.length);
