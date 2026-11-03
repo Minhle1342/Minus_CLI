@@ -128,6 +128,48 @@ import { RateLimitPacer } from './rate-limit-pacer.js';
 export const isScratchFilePath = isScratchPath;
 
 /** Arguments provide capture scope; tool outcomes separately prove which edits succeeded. */
+export function extractHypothesisFromReasoning(text?: string | null): { statement: string; falsificationTest?: string } | undefined {
+  if (!text) return undefined;
+  const match = /(?:\[HYPOTHESIS\]|Hypothesis\s*:)\s*([^\r\n]+)(?:[\s\S]*?(?:\[FALSIFICATION(?:\s*TEST)?\]|Falsification\s*:)\s*([^\r\n]+))?/i.exec(text);
+  if (match) {
+    return {
+      statement: match[1].trim(),
+      falsificationTest: match[2]?.trim(),
+    };
+  }
+  return undefined;
+}
+
+export function isTestFailureRelatedToCurrentTurn(
+  modifiedFiles: Set<string> | string[],
+  result: Record<string, any>,
+  regressionEvidence?: any,
+): boolean {
+  const modifiedList = Array.from(modifiedFiles).map((f) => f.replace(/\\/g, '/').toLowerCase());
+  if (modifiedList.length === 0) return false;
+
+  if (regressionEvidence) {
+    if (regressionEvidence.classification === 'pre_existing_out_of_scope') return false;
+    if (regressionEvidence.classification === 'new_failures_detected') return true;
+  }
+
+  const raw = `${result.stdout || ''}\n${result.stderr || ''}\n${result.error || ''}\n${result.diagnostic || ''}`;
+  const normalizedOutput = raw.replace(/\\/g, '/').toLowerCase();
+  if (!normalizedOutput.trim()) return false;
+
+  const genericNames = new Set(['index.ts', 'index.js', 'types.ts', 'types.js', 'utils.ts', 'utils.js', 'main.ts', 'main.js']);
+
+  for (const file of modifiedList) {
+    if (normalizedOutput.includes(file)) return true;
+    const base = path.posix.basename(file);
+    if (!genericNames.has(base) && base.length >= 4 && normalizedOutput.includes(base)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 export function scopedMutationTargets(toolName: string, args: Record<string, any>): string[] {
   if (!isMutationTool(toolName)) return [];
   const targets = new Set<string>();
@@ -3162,6 +3204,15 @@ export class AgentLoop {
           const requestAnalysis = extractRequestAnalysis(response.reasoningContent);
           if (requestAnalysis) {
             CLI.renderRequestAnalysis(requestAnalysis);
+          }
+          const extractedHypothesis = extractHypothesisFromReasoning(response.reasoningContent);
+          if (extractedHypothesis && !this.hypothesisTracker.getActiveHypothesis()) {
+            this.hypothesisTracker.formulate({
+              statement: extractedHypothesis.statement,
+              falsificationTest: extractedHypothesis.falsificationTest || 'Verification test suite',
+              targetFiles: Array.from(this.targetFilesModifiedInTurn),
+              blastRadius: (this.maxEditBlastRisk as any) || 'MEDIUM',
+            });
           } else if (!this._collapsePreferences.compactSteps) {
             CLI.renderReasoning(response.reasoningContent, { collapsed: this._collapsePreferences.thinking || this._collapsePreferences.compactSteps });
           }
@@ -3607,6 +3658,27 @@ export class AgentLoop {
                   : { reversible: true, checkpoint: true };
             }
             if (!sideEffect && isMutationTool(toolName)) sideEffect = { reversible: true, checkpoint: true };
+            if (isMutationTool(toolName)) {
+              const targetFile = String(toolArgs?.path || toolArgs?.filePath || toolArgs?.targetFile || toolArgs?.TargetFile || '');
+              let activeH = this.hypothesisTracker.getActiveHypothesis();
+              if (!activeH) {
+                const reqAnalysis = extractRequestAnalysis(this._latestReasoning?.thought);
+                const parsedReq = parseRequestAnalysisFields(reqAnalysis);
+                const statement = parsedReq.goal
+                  || (this._latestReasoning?.thought ? this._latestReasoning.thought.slice(0, 150) : undefined)
+                  || (targetFile ? `Modify ${targetFile} to satisfy task goal` : 'Code mutation to satisfy task goal');
+                const falsificationTest = this.lastCommandExecutionState?.command || 'Test suite verification';
+                activeH = this.hypothesisTracker.formulate({
+                  statement,
+                  falsificationTest,
+                  targetFiles: [targetFile].filter(Boolean),
+                  blastRadius: (this.maxEditBlastRisk as any) || 'MEDIUM',
+                  proposedFix: `${toolName} on ${targetFile}`,
+                });
+              } else if (targetFile && !activeH.targetFiles.includes(targetFile)) {
+                activeH.targetFiles.push(targetFile);
+              }
+            }
             if (readySubmission) sideEffect = undefined;
             const effect = sideEffect
               ? this.effectLedger.prepare(toolName, toolCallId, sideEffect.reversible, session.id)
@@ -4379,6 +4451,75 @@ export class AgentLoop {
                 if (this.targetFilesModifiedInTurn.size > 0 && !executionResult.result?.isBackgroundTask) {
                   const green = await this.checkpointManager.createCheckpoint('Verified scoped workspace', { files: [...this.targetFilesModifiedInTurn] });
                   if (green) this.rollbackOrchestrator.markGreenCheckpoint(green);
+                }
+              }
+            }
+
+            if (toolName === 'run_command' && isVerificationCommand(commandForAttribution) && this.targetFilesModifiedInTurn.size > 0) {
+              this.hypothesisTracker.markTesting();
+              const isVerifOk = !isToolResultFailure(executionResult.result) && executionResult.result?.exitCode === 0;
+              const activeH = this.hypothesisTracker.getActiveHypothesis();
+
+              if (isVerifOk) {
+                this.finalAnswerGuard.recordUnrelatedTestFailure(undefined);
+                if (activeH) {
+                  this.hypothesisTracker.markValidated(activeH.id, `Verified with ${commandForAttribution}`);
+                }
+              } else {
+                const isRelated = isTestFailureRelatedToCurrentTurn(
+                  this.targetFilesModifiedInTurn,
+                  executionResult.result,
+                  executionResult.result?.regressionEvidence,
+                );
+
+                if (isRelated) {
+                  if (activeH) {
+                    this.hypothesisTracker.markFalsified(activeH.id, `Verification command "${commandForAttribution}" failed on modified code`);
+                  }
+                  const hId = activeH?.id || 'H';
+                  const rollbackOutcome = await this.rollbackOrchestrator.rollbackOnFalsifiedHypothesis(
+                    hId,
+                    this.hypothesisTracker,
+                  ).catch(() => undefined);
+                  if (rollbackOutcome?.restoredFiles?.length) {
+                    await this.recordWorkspaceRestoration(session, rollbackOutcome.restoredFiles, rollbackOutcome.rolledBack ? rollbackOutcome.restoredCheckpoint?.id : undefined, turn);
+                    for (const f of rollbackOutcome.restoredFiles) {
+                      this.targetFilesModifiedInTurn.delete(f);
+                    }
+                  }
+                  if (rollbackOutcome && executionResult.result && typeof executionResult.result === 'object') {
+                    try {
+                      if (Object.isExtensible(executionResult.result)) {
+                        executionResult.result._system_hypothesis_rollback = rollbackOutcome.guidancePrompt;
+                      } else {
+                        executionResult.result = {
+                          ...executionResult.result,
+                          _system_hypothesis_rollback: rollbackOutcome.guidancePrompt,
+                        };
+                      }
+                    } catch { }
+                  }
+                } else {
+                  if (activeH) {
+                    this.hypothesisTracker.markSupported(activeH.id, `Verification command "${commandForAttribution}" failed on unrelated code`);
+                  }
+                  const unrelatedNotice = `⚠️ [UNRELATED TEST FAILURE]: Verification command "${commandForAttribution}" failed, but the failure is unrelated to code modified in this turn (${Array.from(this.targetFilesModifiedInTurn).join(', ') || 'none'}). Workspace was NOT rolled back. You MUST explicitly notify the user about this unrelated failure in your final answer.`;
+                  if (executionResult.result && typeof executionResult.result === 'object') {
+                    try {
+                      if (Object.isExtensible(executionResult.result)) {
+                        executionResult.result._unrelated_test_failure = unrelatedNotice;
+                      } else {
+                        executionResult.result = {
+                          ...executionResult.result,
+                          _unrelated_test_failure: unrelatedNotice,
+                        };
+                      }
+                    } catch { }
+                  }
+                  this.finalAnswerGuard.recordUnrelatedTestFailure({
+                    command: commandForAttribution,
+                    notice: unrelatedNotice,
+                  });
                 }
               }
             }

@@ -12,7 +12,8 @@ export type FinalAnswerGuardRejectionReason =
   | 'unverified-architecture-claims'
   | 'curt-final-answer'
   | 'system-prompt-echo'
-  | 'insecure-code-confidence';
+  | 'insecure-code-confidence'
+  | 'unrelated-test-failure-not-disclosed';
 
 export interface FinalAnswerGuardDecision {
   allow: boolean;
@@ -199,13 +200,23 @@ const CAPABILITY_DENIAL_PATTERNS = [
  */
 export class FinalAnswerGuard {
   private latestFailure?: ToolFailureSummary;
+  private unrelatedTestFailure?: { command: string; notice: string };
   private observedToolNames = new Set<string>();
   private observedGitEquivalents = new Set<string>();
 
   reset(): void {
     this.latestFailure = undefined;
+    this.unrelatedTestFailure = undefined;
     this.observedToolNames.clear();
     this.observedGitEquivalents.clear();
+  }
+
+  recordUnrelatedTestFailure(failure: { command: string; notice: string }): void {
+    this.unrelatedTestFailure = failure;
+  }
+
+  getUnrelatedTestFailure(): { command: string; notice: string } | undefined {
+    return this.unrelatedTestFailure;
   }
 
   observeToolResult(toolName: string, result: Record<string, any>, args?: Record<string, any>): void {
@@ -286,6 +297,20 @@ export class FinalAnswerGuard {
     // 5b. Kiểm soát Ảo giác ở cấp độ Bảo mật: Chặn Tự tin thái quá vào code nhiễm độc (Insecure Code Confidence)
     const securityDecision = evaluateInsecureCodeConfidence(answer, context);
     if (securityDecision) return securityDecision;
+
+    // 5c. Yêu cầu thông báo cho user nếu có test fail không liên quan đến lần sửa code của turn hiện tại
+    if (this.unrelatedTestFailure) {
+      const mentionsUnrelated = /\b(?:unrelated|pre-existing|preexisting|existing test|test fail|tests? failed|failure in unrelated|loi khong lien quan|that bai khong lien quan|loi test cu)\b/i.test(normalized)
+        || normalized.includes(normalizeForMatching(this.unrelatedTestFailure.command));
+      if (!mentionsUnrelated) {
+        return {
+          allow: false,
+          reason: 'unrelated-test-failure-not-disclosed',
+          recovery: 'revise-answer',
+          continuationPrompt: `[SYSTEM FINAL ANSWER GUARD]: Verification command "${this.unrelatedTestFailure.command}" failed during this turn, but the failure was unrelated to your code changes. You must explicitly inform the user about this unrelated test failure in your final answer before concluding.`,
+        };
+      }
+    }
 
     const advisories = [archDecision, curtDecision].flatMap((d) => d?.advisories || []);
     return { allow: true, ...(advisories.length ? { advisories } : {}) };
