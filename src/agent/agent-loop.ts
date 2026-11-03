@@ -5085,7 +5085,7 @@ export class AgentLoop {
               );
               const noteText = hasSubmittedSolution
                 ? `[SYSTEM FINAL RESPONSE]: submit_solution was accepted. Call no further tools. Return the submitted answer in the user's language and at the requested level of detail. Include only findings and verification actually established. Do not invent code changes, tests, or root causes.`
-                : '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command, create_plan) or concluding the task with a final answer.';
+                : '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command) or concluding the task with a final answer.';
               session.addUserMessage(noteText);
               await this.persistSession(session);
             }

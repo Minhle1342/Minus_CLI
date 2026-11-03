@@ -112,8 +112,7 @@ export class Harness2RecursiveEngine {
         replace_text: '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Code modifications are strictly prohibited during the Plan phase. Survey, inspect, and plan ONLY.',
         apply_patch: '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Applying code patches is strictly prohibited during the Plan phase.',
         read_file: 'Inspect exact file contents and line numbers for architectural understanding. Primary read-only tool.',
-        create_plan: 'Define ordered milestones with dependsOn boundaries and explicit verification criteria.',
-        submit_solution: 'STRICT INVARIANT: Calling submit_solution is blocked until the architectural plan is completed and reviewed.',
+        search_text: 'Search codebase for symbols, callers, and architectural references.',
       };
       candidates.push({
         id: 'inv1',
@@ -134,7 +133,7 @@ export class Harness2RecursiveEngine {
         toolGuidance: planInvToolGuidance,
         toolGuidanceDelta: {
           read_file: 'Inspect exact file contents and line numbers for architectural understanding',
-          create_plan: 'Define ordered milestones with dependsOn boundaries',
+          search_text: 'Search codebase for symbols, callers, and references',
         },
       });
 

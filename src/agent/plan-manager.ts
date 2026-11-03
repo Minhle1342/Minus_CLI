@@ -917,7 +917,7 @@ export class PlanManager {
         `Turn: ${requirements.turn ?? 'unscoped'}`,
         `Goal: ${requirements.goal || '(not captured)'}`,
         requirements.required
-          ? `PLAN REQUIRED: call create_plan with ${requirements.minimumTasks}-${requirements.maximumTasks} atomic steps before doing multi-step work or answering finally.`
+          ? `PLAN REQUIRED: outline ${requirements.minimumTasks}-${requirements.maximumTasks} atomic steps with verification criteria before doing multi-step work or answering finally.`
           : 'No plan exists. A plan is optional for a genuinely single-step request.',
         'Never use one task that merely restates the user request.',
       ].join('\n');
