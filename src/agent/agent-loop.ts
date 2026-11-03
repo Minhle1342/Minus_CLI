@@ -4515,7 +4515,6 @@ export class AgentLoop {
                       }
                     } catch { }
                   }
-                  CLI.renderReflectionAlert(1, unrelatedNotice);
                 }
               }
             }
