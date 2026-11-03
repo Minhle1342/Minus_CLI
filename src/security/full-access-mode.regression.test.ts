@@ -147,6 +147,13 @@ test('gate 7 child_env_scrub: host tokens reach the child env only with the gate
 
 test('kept gate push_to_main: git push origin main is refused with every gate open', async () => {
   assert.equal(isBlockedGitPushToMain('git push origin main'), true);
+  assert.equal(isBlockedGitPushToMain('git push -u origin HEAD:main'), true);
+  assert.equal(isBlockedGitPushToMain('git push origin refs/heads/master'), true);
+  assert.equal(isBlockedGitPushToMain('git push origin :main'), true);
+  // A branch/tag whose NAME merely contains a main ref word is not a push to main.
+  assert.equal(isBlockedGitPushToMain('git push origin feature/main-fix'), false);
+  assert.equal(isBlockedGitPushToMain('git push origin main-v2'), false);
+  assert.equal(isBlockedGitPushToMain('git status'), false);
   const permissions = new PermissionManager('full_access');
   const subagent = await permissions.checkPermission(
     'run_command',

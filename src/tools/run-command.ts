@@ -461,8 +461,11 @@ export function isBlockedGitPushToMain(command: string): boolean {
   if (!/\bgit(?:\.exe)?\b/i.test(trimmed)) return false;
   const subcmd = findGitSubcommand(command);
   if (subcmd !== 'push') return false;
-  // Match: git push origin main, git push -u origin main, git push origin HEAD:main, git push ... master
-  return /\b(?:origin\s+)?(?:HEAD:)?(?:main|master)\b/i.test(trimmed);
+  // Match a refspec whose destination is exactly main/master (git push origin
+  // main, HEAD:main, refs/heads/master, :main, --delete main). A branch or tag
+  // NAME that merely contains "main"/"master" (feature/main-fix, main-v2) is
+  // not a push to main.
+  return /(?:^|[\s,+~^])(?:[^\s,]*:)?(?:refs\/heads\/)?(?:main|master)(?=$|[\s,]|\.\.)/i.test(trimmed);
 }
 
 /**
@@ -1578,7 +1581,16 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       const permArgs = { ...args, command: rawCommand, CommandLine: rawCommand };
 
-      if (needsApproval && !hasExplicitPermission && effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
+      // A file-tool misuse (cat/ls/grep/rm via shell) in a session with no
+      // approval channel can never be approved; skip the dead prompt and let
+      // the COMMAND_NOT_ALLOWED branch below redirect to the dedicated tool.
+      const misuseEarly = detectFileCommandMisuse(rawCommand);
+      const modeEarly = effectivePermissionManager?.getMode?.();
+      const skipDeadPrompt = Boolean(misuseEarly)
+        && !hasApprovalChannel(effectivePermissionManager)
+        && ['always_ask', 'ask_sensitive', 'read_only'].includes(String(modeEarly || ''));
+
+      if (needsApproval && !hasExplicitPermission && !skipDeadPrompt && effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
         const permCheck = await effectivePermissionManager.checkPermission('run_command', permArgs, context);
         if (permCheck.allowed) {
           hasExplicitPermission = true;
@@ -1738,19 +1750,26 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       });
       const backgroundEligible = effectiveWaitMs !== undefined && effectiveWaitMs > 0 && taskManager;
       if (backgroundEligible) {
-        // BackgroundTask uses host `spawn(shell: true)`, not SandboxManager.
-        // Never let auto silently bypass an available Docker isolation boundary.
+        // BackgroundTask spawns a host process; under isolation, dispatch a
+        // `docker exec` client instead so auto never silently leaves the boundary.
+        // shortcut: killing the task kills the docker exec client, not the
+        // in-container process group — upgrade: exec in-container via a PID file
+        // and `docker exec ... kill`, or kill the container on dispose.
+        let isolatedArgv: string[] | undefined;
         if (executionTarget === 'auto' && sandboxManager?.getStatus?.()?.isIsolated) {
-          return {
-            command: effectiveCommand,
-            message: 'Background execution currently uses the host process manager and cannot preserve the selected Docker isolation boundary.',
-            preflightCode: 'BACKGROUND_ISOLATION_UNSUPPORTED',
-            suggestion: 'Run this finite command synchronously in the sandbox, or explicitly choose execution_target="host" if host execution is intended.',
-            commandOutcome: 'blocked_preflight',
-            processStarted: false,
-            success: false,
-            durationMs: 1,
-          };
+          isolatedArgv = sandboxManager.getExecArgv?.(dispatchCommand, dispatchEnv);
+          if (!isolatedArgv) {
+            return {
+              command: effectiveCommand,
+              message: 'Background execution could not attach to the active Docker container, so the isolation boundary cannot be preserved.',
+              preflightCode: 'BACKGROUND_ISOLATION_UNSUPPORTED',
+              suggestion: 'Run this finite command synchronously in the sandbox, or explicitly choose execution_target="host" if host execution is intended.',
+              commandOutcome: 'blocked_preflight',
+              processStarted: false,
+              success: false,
+              durationMs: 1,
+            };
+          }
         }
         if (networkGitCommand) {
           return {
@@ -1764,6 +1783,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           autoPromoted: false,
           inbox: (context as any)?.inbox,
           gates,
+          ...(isolatedArgv ? { argv: isolatedArgv } : {}),
         });
         const startTime = Date.now();
         if (longLived) {
@@ -1904,7 +1924,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           cwd: sessionCwd,
           timeoutMs: timeoutMs,
           signal: context?.signal,
-          env: { ...dispatchEnv, ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}) },
+          env: {
+            ...buildSafeChildEnv(dispatchEnv, gates),
+            ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}),
+          },
         });
 
         // Tự động Auto-Provision nếu native command thất bại do thiếu binary
@@ -1925,7 +1948,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                 timeoutMs: timeoutMs,
                 signal: context?.signal,
                 env: {
-                  ...dispatchEnv,
+                  ...buildSafeChildEnv(dispatchEnv, gates),
                   ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}),
                   ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
                 },

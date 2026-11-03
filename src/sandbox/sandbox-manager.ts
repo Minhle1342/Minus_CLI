@@ -161,6 +161,19 @@ export class SandboxManager {
   }
 
   /**
+   * argv that runs a command inside the active container. Background tasks use
+   * it so dispatch keeps the Docker boundary instead of falling back to spawn.
+   * Returns undefined when there is no live container.
+   */
+  getExecArgv(command: string, env?: Record<string, string>): string[] | undefined {
+    const status = this.getStatus();
+    if (!status.isIsolated || !status.containerId) return undefined;
+    const envFlags: string[] = [];
+    for (const [key, value] of Object.entries(env || {})) envFlags.push('-e', `${key}=${value}`);
+    return ['docker', 'exec', '-i', ...envFlags, status.containerId, 'sh', '-c', command];
+  }
+
+  /**
    * Cập nhật thư mục workspace
    */
   async updateWorkspace(newWorkspacePath: string): Promise<void> {

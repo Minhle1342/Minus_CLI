@@ -20,6 +20,11 @@ export interface BackgroundTaskOptions {
   inbox?: Pick<AgentInbox, 'enqueue'>;
   /** Gate full access (gate 7) do caller truyền xuống; thiếu ⇒ env con vẫn scrub. */
   gates?: GateReader;
+  /**
+   * Spawn this argv directly instead of `command` through a shell. Used to keep
+   * a background task inside Docker (`docker exec -i ...`).
+   */
+  argv?: string[];
 }
 
 export interface BackgroundTask {
@@ -106,11 +111,14 @@ export class TaskManager {
       autoPromoted: options?.autoPromoted,
     };
 
-    // Khởi chạy child process với shell và env đã scrub (không leak host secrets)
-    const child = spawn(command, [], {
+    // Khởi chạy child process với shell và env đã scrub (không leak host secrets).
+    // argv (Docker exec) chạy không qua shell để giữ nguyên argument boundaries.
+    const spawnTarget = options?.argv?.length ? options.argv[0] : command;
+    const spawnArgs = options?.argv?.length ? options.argv.slice(1) : [];
+    const child = spawn(spawnTarget, spawnArgs, {
       cwd: effectiveCwd,
       env: buildSafeChildEnv(env, options?.gates),
-      shell: true,
+      shell: !options?.argv?.length,
       // POSIX process groups make whole-tree termination possible. Windows
       // uses taskkill /T against the exact shell PID instead.
       detached: process.platform !== 'win32',

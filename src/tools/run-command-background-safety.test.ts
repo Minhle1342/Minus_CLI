@@ -9,6 +9,41 @@ function taskManagerThatMustNotStart() {
   } as any;
 }
 
+test('background dispatch keeps the Docker boundary through docker exec argv', async () => {
+  let captured: any;
+  const sandbox = {
+    getStatus: () => ({ mode: 'docker', isIsolated: true, fallbackToLocal: false, containerId: 'abc123' }),
+    getExecArgv: (command: string) => ['docker', 'exec', '-i', 'abc123', 'sh', '-c', command],
+    exec: async () => { throw new Error('must not execute synchronously'); },
+  } as any;
+  const taskManager = {
+    startTask: (_command: string, _cwd: string, _env: any, options: any) => {
+      captured = options;
+      return { id: 'task_1', status: 'stopped', exitCode: 0, logs: ['ok'], stopRequested: false };
+    },
+  } as any;
+  const result = await createRunCommandTool(sandbox, taskManager).execute(
+    { command: 'npm test', WaitMsBeforeAsync: 100 }, new Workspace(),
+  );
+  assert.equal(result.commandOutcome, 'succeeded');
+  assert.deepEqual(captured.argv.slice(0, 4), ['docker', 'exec', '-i', 'abc123']);
+});
+
+test('no approval channel: shell file-misuse skips the dead prompt and redirects to the tool', async () => {
+  let prompted = 0;
+  const permissionManager = {
+    getMode: () => 'always_ask',
+    hasApprovalChannel: () => false,
+    checkPermission: async () => { prompted++; return { allowed: false, errorCode: 'APPROVAL_REQUIRED' }; },
+  } as any;
+  const result = await createRunCommandTool(undefined, undefined, permissionManager).execute(
+    { command: 'cat src/a.ts && ./run-custom.sh' }, new Workspace(), {},
+  );
+  assert.equal(prompted, 0);
+  assert.equal(result.errorCode, 'COMMAND_NOT_ALLOWED');
+  assert.match(String(result.suggestion), /read_file/);
+});
+
 test('auto background dispatch refuses to cross an available Docker boundary', async () => {
   const sandbox = {
     getStatus: () => ({ isIsolated: true, fallbackToLocal: false }),
