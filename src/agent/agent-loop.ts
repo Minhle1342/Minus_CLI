@@ -4461,7 +4461,6 @@ export class AgentLoop {
               const activeH = this.hypothesisTracker.getActiveHypothesis();
 
               if (isVerifOk) {
-                this.finalAnswerGuard.recordUnrelatedTestFailure(undefined);
                 if (activeH) {
                   this.hypothesisTracker.markValidated(activeH.id, `Verified with ${commandForAttribution}`);
                 }
@@ -4516,10 +4515,7 @@ export class AgentLoop {
                       }
                     } catch { }
                   }
-                  this.finalAnswerGuard.recordUnrelatedTestFailure({
-                    command: commandForAttribution,
-                    notice: unrelatedNotice,
-                  });
+                  CLI.renderReflectionAlert(1, unrelatedNotice);
                 }
               }
             }

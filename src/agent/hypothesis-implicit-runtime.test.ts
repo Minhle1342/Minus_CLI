@@ -4,7 +4,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { extractHypothesisFromReasoning, isTestFailureRelatedToCurrentTurn, AgentLoop } from './agent-loop.js';
-import { FinalAnswerGuard } from './final-answer-guard.js';
 import { HypothesisTracker } from './hypothesis-tracker.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { Session } from '../session/session.js';
@@ -84,39 +83,6 @@ test('isTestFailureRelatedToCurrentTurn classifies failures accurately', () => {
   );
 });
 
-test('FinalAnswerGuard requires disclosing unrelated test failure before completing', () => {
-  const guard = new FinalAnswerGuard();
-  assert.equal(guard.getUnrelatedTestFailure(), undefined);
-
-  // Normal answer passes
-  const initialDecision = guard.evaluate('Task completed successfully.');
-  assert.equal(initialDecision.allow, true);
-
-  // Record an unrelated failure
-  guard.recordUnrelatedTestFailure({
-    command: 'npm test',
-    notice: 'Unrelated failure in test/legacy.test.ts',
-  });
-  assert.ok(guard.getUnrelatedTestFailure());
-
-  // Answer without mentioning unrelated failure is rejected
-  const rejectedDecision = guard.evaluate('I fixed the bug in agent-loop.ts. Everything is complete!');
-  assert.equal(rejectedDecision.allow, false);
-  assert.equal(rejectedDecision.reason, 'unrelated-test-failure-not-disclosed');
-  assert.ok(rejectedDecision.continuationPrompt?.includes('failed during this turn, but the failure was unrelated'));
-
-  // Answer mentioning unrelated failure passes
-  const allowedDecision = guard.evaluate(
-    'I updated agent-loop.ts cleanly. Note: npm test had an unrelated test failure in legacy.test.ts that was pre-existing.',
-  );
-  assert.equal(allowedDecision.allow, true);
-
-  // Reset clears the requirement
-  guard.reset();
-  assert.equal(guard.getUnrelatedTestFailure(), undefined);
-  assert.equal(guard.evaluate('All finished.').allow, true);
-});
-
 test('HypothesisTracker manages lifecycle state transitions', () => {
   const tracker = new HypothesisTracker();
   const h = tracker.formulate({
@@ -149,7 +115,7 @@ class MockHypothesisLLM {
   }
 }
 
-test('AgentLoop does NOT rollback on unrelated test failure and enforces disclosure in final answer', async () => {
+test('AgentLoop does NOT rollback on unrelated test failure and records notice directly without brittle regex blocks', async () => {
   const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'unrelated-fail-test-'));
   try {
     const workspace = new Workspace(rootDir);
@@ -192,14 +158,9 @@ test('AgentLoop does NOT rollback on unrelated test failure and enforces disclos
       {
         toolCalls: [{ id: 'call-2', name: 'run_command', args: { command: 'npm test' } }],
       },
-      // Step 3: LLM tries to complete WITHOUT mentioning the unrelated failure (should be rejected by guard)
+      // Step 3: LLM provides answer informing user about feature changes and unrelated test
       {
-        text: 'I have updated feature.ts to val = 2. Everything is done.',
-        toolCalls: [],
-      },
-      // Step 4: After rejection, LLM provides answer disclosing the unrelated test failure
-      {
-        text: 'I have updated src/feature.ts. Note: npm test had an unrelated test failure in legacy-module.test.ts.',
+        text: 'I updated src/feature.ts to val = 2. Notice: npm test reported pre-existing failures in legacy-module.',
         toolCalls: [],
       },
     ];
@@ -222,12 +183,19 @@ test('AgentLoop does NOT rollback on unrelated test failure and enforces disclos
     session.addUserMessage('Update feature.ts');
     const finalAnswer = await loop.run(session);
 
-    // Verify 4 calls were made (meaning Step 3 was rejected and Step 4 was accepted)
-    assert.equal(llm.callCount, 4);
-    assert.match(finalAnswer, /unrelated test failure/i);
+    // Verify 3 calls were made and completed without false gate-block rejections
+    assert.equal(llm.callCount, 3);
+    assert.match(finalAnswer, /updated src\/feature\.ts/i);
+
     // Verify file changes were NOT rolled back
     const fileContent = await fs.readFile(path.join(rootDir, 'src', 'feature.ts'), 'utf-8');
     assert.equal(fileContent, 'export const val = 2;');
+
+    // Verify tool result recorded the unrelated failure notice
+    const toolEvents = session.getEvents().filter((e) => e.type === 'tool/result');
+    const runCmdResult = toolEvents.find((e) => e.data.toolName === 'run_command')?.data.result;
+    assert.ok(runCmdResult?._unrelated_test_failure);
+    assert.match(runCmdResult._unrelated_test_failure, /UNRELATED TEST FAILURE/);
   } finally {
     await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
   }
