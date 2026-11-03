@@ -47,8 +47,8 @@ test('decoder handles fragmented keys and paste without submitting pasted newlin
   assert.equal(paste.key, 'paste'); assert.equal(paste.text, 'first\nsecond');
   assert.equal(decoder.feed('\x18')[0].key, 'ctrl+x');
   assert.equal(decoder.feed('\x00')[0].key, 'ctrl+space');
-  assert.equal(decoder.feed('\x1b[5~')[0].key, 'up');
-  assert.equal(decoder.feed('\x1b[6~')[0].key, 'down');
+  assert.equal(decoder.feed('\x1b[5~')[0].key, 'pageup');
+  assert.equal(decoder.feed('\x1b[6~')[0].key, 'pagedown');
 });
 
 test('external editor reads changes, restores terminal on child failure and removes temporary file', async () => {

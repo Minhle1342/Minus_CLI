@@ -73,6 +73,16 @@ test('composer preserves multiline paste, graphemes, history and completion suff
   assert.equal(composer.value, 'new');
 });
 
+test('PgUp/PgDn move the caret through soft-wrapped composer rows without scrolling', () => {
+  const [initial] = update({ type: 'compose', text: 'aaaa bbbb cccc dddd' }, createRootModel({ width: 10, height: 24 }));
+  // width 10 → ['› aaaa ', 'bbbb cccc ', 'dddd']; caret cuối = dòng 2, cột 4.
+  let [model] = update({ type: 'key', key: 'pageup', now: 1 }, initial);
+  assert.equal(model.composer.cursorOffset, 9);
+  assert.equal(model.viewport.offset, 0);
+  [model] = update({ type: 'key', key: 'pagedown', now: 2 }, model);
+  assert.equal(model.composer.cursorOffset, 19);
+});
+
 test('palette selects slash commands and dialogs isolate permission answers', () => {
   let model = createRootModel({ commands: [{ id: '/help', label: 'Help', description: 'Commands' }] });
   [model] = update(key('ctrl+p'), model);

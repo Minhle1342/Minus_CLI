@@ -1,6 +1,6 @@
 import path from 'node:path';
 import type { RootModel, Msg, Cmd, PaletteItem, Action, KernelMsg, TranscriptEntry, SessionTab, SessionTabsModel } from '../types.js';
-import { createComposer, updateComposer, composerView, composerDisplay } from './composer-model.js';
+import { createComposer, updateComposer, composerView, composerDisplay, moveComposerVertical } from './composer-model.js';
 import { appendEntry, viewportView, viewportLines, lastAnswerOffset, createSessionTabs, syncSessionTabs, adoptActiveTab, adoptAfterSync, ownerAppendEntry, ownerReplaceLastEntry, ownerStream, ownerNoteThinkingStart, ownerArchiveThinking, ownerClearStream, ownerFlushLiveAnswer, thoughtToggleHit, toggleThought, sanitizeComposer, sessionTabsKey, sessionTabStripView, sessionTabsView, sessionStripHit, sessionStripClick, tabDisplayModel, shortTabTitle, switchToTab } from './viewport-model.js';
 import { sidebarView } from './sidebar-model.js';
 import { paletteItems, paletteView } from './palette-model.js';
@@ -703,6 +703,10 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         return [model, []];
       }
       if (msg.key === 'pageup' || msg.key === 'pagedown') {
+        // PgUp/PgDn ưu tiên di chuyển caret trong ô nhập; chỉ cuộn transcript
+        // khi caret không thể lên/xuống (ô nhập trống hoặc không có dòng đích).
+        const composer = moveComposerVertical(model.composer, model.width, msg.key === 'pageup' ? -1 : 1);
+        if (composer !== model.composer) return [{ ...model, composer }, []];
         const mainWidth = Math.max(1, model.width - sidebarWidthFor(model.width, model.sidebar.visible, model.height));
         const maxOffset = Math.max(0, viewportLines(model.viewport, mainWidth).length - Math.max(1, model.height - 6));
         const delta = (msg.key.endsWith('up') ? 1 : -1) * Math.max(1, model.height - 6);
