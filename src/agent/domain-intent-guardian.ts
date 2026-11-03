@@ -469,45 +469,8 @@ export class DomainIntentGuardian {
   /**
    * Giám sát dòng suy luận (Thoughts) của Model để phát hiện Goal Substitution (Wink Meta AI)
    */
-  public observeModelThoughts(thoughts: string): DriftIntervention | null {
-    if (!this.contract || !thoughts) return null;
-    const lower = thoughts.toLowerCase();
-
-    // Dấu hiệu từ bỏ mục tiêu ban đầu để chọn phương án dễ hơn
-    const goalSubstitutionTriggers = [
-      'thay vì giải quyết',
-      'thay vì sửa logic',
-      'bỏ qua yêu cầu này',
-      'tạm thời mock',
-      'hardcode giá trị',
-      'bỏ qua kiểm tra',
-      'temporarily mock',
-      'temporary mock',
-      'mock the return',
-      'mocking the',
-      'bypass this',
-      'skip this test',
-      'skip this check',
-      'instead of fixing',
-      'skip this requirement',
-      'hardcode the result',
-      'hardcode the value',
-      'cannot fix',
-      'too complex to fix',
-    ];
-
-    for (const trigger of goalSubstitutionTriggers) {
-      if (lower.includes(trigger)) {
-        this.consecutiveDriftWarnings++;
-        return {
-          type: 'GOAL_DRIFT',
-          severity: 'WARNING',
-          message: `[SPECIFICATION DRIFT DETECTED (Wink Meta AI)]: The system detected signs that you are abandoning the original business goal ("${this.contract.coreGoal}").`,
-          courseCorrectionGuidance: `Do not lower the bar or hardcode a fake solution. Mandatory business goal: "${this.contract.coreGoal}". Focus on solving the true root cause per the frozen business contract.`,
-        };
-      }
-    }
-
+  public observeModelThoughts(_thoughts: string): DriftIntervention | null {
+    // Model thoughts are unconstrained; LLM is free to reason without drift intervention
     return null;
   }
 
@@ -515,31 +478,8 @@ export class DomainIntentGuardian {
    * Định dạng khối Hợp đồng Nghiệp vụ đóng băng để tiêm vào Prompt Context
    */
   public formatContractForPromptContext(): string {
-    if (!this.contract) return '';
-    const lines: string[] = [
-      `🎯 [DOMAIN INTENT CONTRACT - FROZEN (WINK & CARE SPECIFICATION)]:`,
-      `• Core Business Objective: "${this.contract.coreGoal}"`,
-    ];
-
-    if (this.contract.nonNegotiableConstraints.length > 0) {
-      lines.push(`• Non-Negotiable Constraints:`);
-      for (const c of this.contract.nonNegotiableConstraints) {
-        lines.push(`  - 🔒 ${c}`);
-      }
-    }
-
-    if (this.contract.domainInvariants.length > 0) {
-      lines.push(`• Domain Invariants:`);
-      for (const inv of this.contract.domainInvariants) {
-        lines.push(`  - ⚖️ ${inv}`);
-      }
-    }
-
-    if (!this.contract.allowTestFileModification) {
-      lines.push(`• Preserve existing test assertions; modifying existing tests needs explicit authorization. Independent new regression tests may be added within task scope.`);
-    }
-
-    return lines.join('\n');
+    // Prompt context left unconstrained so LLM interprets user intent directly
+    return '';
   }
 
   public reset(): void {

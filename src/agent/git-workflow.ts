@@ -1,8 +1,7 @@
 import type { CompletionObservation } from './completion-observations.js';
 import { hasObservedMutation } from './completion-observations.js';
 import { isVerificationCommand, extractCommandString } from './completion-evidence.js';
-import { normalizeIntentText, detectExplicitGitMutationIntent } from '../tools/git-intent.js';
-import { classifyGitCommand, detectExplicitGitCommandNames, parseGitInvocation } from '../tools/git-command-policy.js';
+import { classifyGitCommand, detectExplicitGitCommandNames, normalizeIntentText, parseGitInvocation } from '../tools/git-command-policy.js';
 import { parseShellAst } from '../security/shell-ast-parser.js';
 import type { GitWorkflowPromptId } from '../llm/prompt-sections.js';
 
@@ -46,21 +45,16 @@ export interface GitWorkflowInput {
 /** Operation-local negation keeps "commit, do not push" scoped to commit. */
 export function gitWorkflowScope(request: string, mayEdit: boolean, implementationRequested = false): GitWorkflowScope {
   const text = normalizeIntentText(request);
-  const mutation = detectExplicitGitMutationIntent(request);
   const discussion = /\b(?:how|why|whether|explain|tai sao|giai thich|co can|ho tro)\b/.test(text)
     && !/^(?:please|hay|vui long|thuc hien|chay|commit|push|git)\b/.test(text);
   const names = discussion ? [] : detectExplicitGitCommandNames(request);
   const denied = (name: string) => new RegExp(`\\b(?:do not|dont|never|without|khong|dung)\\s+(?:git\\s+)?${name}\\b`).test(text);
   const operations = names.filter((name) => !denied(name));
-  const commit = (mutation.commit || names.includes('commit')) && !discussion && !denied('commit');
+  const commit = names.includes('commit') && !discussion && !denied('commit');
   // Commit authorization includes selective staging, but staging alone never includes commit.
-  if ((commit || mutation.stage) && (!mutation.commit || commit) && !discussion && !denied('add') && !denied('stage') && !operations.includes('add')) operations.push('add');
+  if (commit && !discussion && !denied('add') && !denied('stage') && !operations.includes('add')) operations.push('add');
   if (!commit) {
     const index = operations.indexOf('commit');
-    if (index >= 0) operations.splice(index, 1);
-  }
-  if (!mutation.push && !names.includes('push')) {
-    const index = operations.indexOf('push');
     if (index >= 0) operations.splice(index, 1);
   }
   // Listing refs/stashes does not authorize a branch or stash mutation.

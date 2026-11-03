@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import { readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import { exec } from 'node:child_process';
 import { Type } from '@google/genai';
@@ -456,16 +457,91 @@ export async function finalizeCommandResult(
  * Kiểm tra xem lệnh Git push có nhắm tới nhánh main/master hay không.
  * Tuân thủ nghiêm ngặt User Rule 2: Chặn tự động push lên main để không kích hoạt CI/CD Railway.
  */
+const GIT_GLOBAL_VALUE_FLAGS = ['-c', '--git-dir', '--work-tree', '--namespace', '--super-prefix', '--config-env'];
+const MAIN_DESTINATION_REFS = new Set(['main', 'master', 'refs/heads/main', 'refs/heads/master']);
+
+/**
+ * Every `git <subcommand>` invocation in a shell command line, with the tokens that
+ * follow it. A backslash-newline is a line continuation — the shell joins it before
+ * git runs, so `git \<newline> push origin main` has to read as one invocation.
+ * Quotes are stripped because the shell hands git the unquoted word, and global
+ * options are skipped to reach the subcommand.
+ */
+function* gitInvocations(command: string): Generator<{ subcommand: string; tokens: string[] }> {
+  const joined = command.replace(/\\\r?\n[ \t]*/g, ' ');
+  for (const invocation of joined.matchAll(/\bgit(?:\.exe)?\b([^;&|\n]*)/gi)) {
+    const tokens = (String(invocation[1] || '').match(/"[^"]*"|'[^']*'|\S+/g) || [])
+      .map((token) => token.replace(/^["']+|["']+$/g, '').toLowerCase());
+    let index = 0;
+    let subcommand: string | undefined;
+    while (index < tokens.length) {
+      const token = tokens[index];
+      if (GIT_GLOBAL_VALUE_FLAGS.includes(token)) { index += 2; continue; }
+      if (/^(?:--git-dir=|--work-tree=|--namespace=)/.test(token)) { index++; continue; }
+      if (token.startsWith('-')) { index++; continue; }
+      subcommand = token;
+      index++;
+      break;
+    }
+    if (subcommand) yield { subcommand, tokens: tokens.slice(index) };
+  }
+}
+
 export function isBlockedGitPushToMain(command: string): boolean {
-  const trimmed = command.trim().toLowerCase();
-  if (!/\bgit(?:\.exe)?\b/i.test(trimmed)) return false;
-  const subcmd = findGitSubcommand(command);
-  if (subcmd !== 'push') return false;
-  // Match a refspec whose destination is exactly main/master (git push origin
-  // main, HEAD:main, refs/heads/master, :main, --delete main). A branch or tag
-  // NAME that merely contains "main"/"master" (feature/main-fix, main-v2) is
-  // not a push to main.
-  return /(?:^|[\s,+~^])(?:[^\s,]*:)?(?:refs\/heads\/)?(?:main|master)(?=$|[\s,]|\.\.)/i.test(trimmed);
+  if (!command || !/\bgit(?:\.exe)?\b/i.test(command)) return false;
+  // Only a refspec whose DESTINATION is exactly main/master counts (`git push origin
+  // "main"`, `git push origin main;echo`, `$(echo main)` and `git -C . push origin
+  // main` are all blocked), while a name that merely contains the word
+  // (feature/main-fix, main-v2, maintenance) or a push onto another branch is not.
+  for (const { subcommand, tokens } of gitInvocations(command)) {
+    if (subcommand !== 'push') continue;
+    for (const token of tokens) {
+      if (token.startsWith('-')) continue;
+      const destination = token.slice(token.lastIndexOf(':') + 1).replace(/[^a-z0-9._/-]/g, '');
+      if (MAIN_DESTINATION_REFS.has(destination)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * `git push` with no refspec publishes the branch that is checked out, so that
+ * destination is a repository fact rather than text in the command line — the
+ * string predicate above cannot see it. `currentBranch` comes from readCheckedOutBranch.
+ */
+export function isCurrentBranchPushToMain(command: string, currentBranch?: string): boolean {
+  if (!command || !currentBranch || !/\bgit(?:\.exe)?\b/i.test(command)) return false;
+  const branch = currentBranch.trim().replace(/^refs\/heads\//, '').toLowerCase();
+  if (!MAIN_DESTINATION_REFS.has(branch)) return false;
+  for (const { subcommand, tokens } of gitInvocations(command)) {
+    if (subcommand !== 'push') continue;
+    const operands = tokens.filter((token) => !token.startsWith('-'));
+    // Two operands or a ':' destination already name what is published, and
+    // isBlockedGitPushToMain judged them; only a bare `git push`/`git push origin`
+    // (or `--all`) hides the destination in the checked-out branch.
+    if (operands.length >= 2 || operands.some((token) => token.includes(':'))) continue;
+    return true;
+  }
+  return false;
+}
+
+/** The branch name git would publish for a refspec-less push, read from .git/HEAD. */
+export function readCheckedOutBranch(workspaceRoot: string): string | undefined {
+  try {
+    const dotGit = path.join(workspaceRoot, '.git');
+    let gitDir = dotGit;
+    if (statSync(dotGit).isFile()) {
+      // A worktree or submodule carries a `gitdir:` pointer instead of a directory.
+      const pointer = readFileSync(dotGit, 'utf8').match(/^gitdir:[ \t]*(.+)$/mi)?.[1]?.trim();
+      if (!pointer) return undefined;
+      gitDir = path.isAbsolute(pointer) ? pointer : path.resolve(path.dirname(dotGit), pointer);
+    }
+    const head = readFileSync(path.join(gitDir, 'HEAD'), 'utf8').trim();
+    // Detached HEAD has no branch to publish.
+    return /^ref:[ \t]*refs\/heads\/(.+)$/i.exec(head)?.[1]?.trim() || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1334,7 +1410,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Use for build, test, lint, script, Git, and database commands. Database operations: prioritize `docker exec -i` when containerized, isolate credentials via env vars (PGPASSWORD, MYSQL_PWD, REDISCLI_AUTH), use non-interactive one-shot flags, and only execute mutations or backups when explicitly requested by the user. Standard database patterns: PostgreSQL: `PGPASSWORD=secret psql -h localhost -U user -d db -c \"SELECT 1;\"` or `docker exec -i -e PGPASSWORD=secret <container> psql -U user -d db -c \"SELECT 1;\"` (backup: `PGPASSWORD=secret pg_dump -h localhost -U user -d db > backup.sql`); MySQL: `MYSQL_PWD=secret mysql -h 127.0.0.1 -u user db -e \"SHOW TABLES;\"` or `docker exec -i -e MYSQL_PWD=secret <container> mysql -u user db -e \"SHOW TABLES;\"` (backup: `MYSQL_PWD=secret mysqldump -u user db > backup.sql`); SQLite: `sqlite3 db.sqlite \".tables\"` or `sqlite3 db.sqlite \"SELECT * FROM users;\"` (backup: `sqlite3 db.sqlite \".dump\" > backup.sql`); MongoDB: `mongosh --host localhost:27017 -u user --eval \"db.stats()\"` or `docker exec -i <container> mongosh --eval \"db.getCollectionNames()\"`; Redis: `REDISCLI_AUTH=secret redis-cli -h localhost -p 6379 ping` or `docker exec -i -e REDISCLI_AUTH=secret <container> redis-cli info`. Default to `auto` (prefers the isolated Internal/sandbox environment when available). For a private GitHub clone/fetch, choose `execution_target: "host"` (External) to use the host Git Credential Manager; public Git can use auto. Never put credentials in Git URLs or commands. Host commands remain subject to host policy, the allowlist, and approval. The runtime enforces the allowlist (explore/build/test/git/docker-read groups); this schema lists groups, not every binary. Commands outside the allowlist may require approval and can still be rejected by policy. For repository code, prefer dedicated tools (`list_files`, `search_text`, `read_file`); for databases, container CLI, system state, and diagnostics, use run_command directly; never use shell `mv` for workspace files; moves and deletes go through the file-mutation tools with source and target paths. cat/ls/sed/rg single calls are auto-emulated (<5ms) so they work cross-platform, but dedicated tools save tokens. Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded-output `|` pipelines (two allowlisted segments only). Avoid unrelated chains, subshells/grouping, and `$()`; interactive REPL/vim and complex commands may require approval or are blocked by preflight. Large output is truncated with logFilePath: read it via read_file instead of re-running. Use `timeout_ms` for finite long-running builds/tests, and `WaitMsBeforeAsync` with the task manager for servers/watchers. Git mutations require direct user intent; stage only explicit paths (`git add -- <paths>`, never -A/./wildcards unless the request is an explicit commit); pushes to main/master require approval; system-destructive commands are prohibited.',
+          description: 'Use for build, test, lint, script, Git, and database commands. Database operations: prioritize `docker exec -i` when containerized, isolate credentials via env vars (PGPASSWORD, MYSQL_PWD, REDISCLI_AUTH), use non-interactive one-shot flags, and only execute mutations or backups when explicitly requested by the user. Standard database patterns: PostgreSQL: `PGPASSWORD=secret psql -h localhost -U user -d db -c \"SELECT 1;\"` or `docker exec -i -e PGPASSWORD=secret <container> psql -U user -d db -c \"SELECT 1;\"` (backup: `PGPASSWORD=secret pg_dump -h localhost -U user -d db > backup.sql`); MySQL: `MYSQL_PWD=secret mysql -h 127.0.0.1 -u user db -e \"SHOW TABLES;\"` or `docker exec -i -e MYSQL_PWD=secret <container> mysql -u user db -e \"SHOW TABLES;\"` (backup: `MYSQL_PWD=secret mysqldump -u user db > backup.sql`); SQLite: `sqlite3 db.sqlite \".tables\"` or `sqlite3 db.sqlite \"SELECT * FROM users;\"` (backup: `sqlite3 db.sqlite \".dump\" > backup.sql`); MongoDB: `mongosh --host localhost:27017 -u user --eval \"db.stats()\"` or `docker exec -i <container> mongosh --eval \"db.getCollectionNames()\"`; Redis: `REDISCLI_AUTH=secret redis-cli -h localhost -p 6379 ping` or `docker exec -i -e REDISCLI_AUTH=secret <container> redis-cli info`. Default to `auto` (prefers the isolated Internal/sandbox environment when available). For a private GitHub clone/fetch, choose `execution_target: "host"` (External) to use the host Git Credential Manager; public Git can use auto. Never put credentials in Git URLs or commands. Host commands remain subject to host policy, the allowlist, and approval. The runtime enforces the allowlist (explore/build/test/git/docker-read groups); this schema lists groups, not every binary. Commands outside the allowlist may require approval and can still be rejected by policy. For repository code, prefer dedicated tools (`list_files`, `search_text`, `read_file`); for databases, container CLI, system state, and diagnostics, use run_command directly; never use shell `mv` for workspace files; moves and deletes go through the file-mutation tools with source and target paths. cat/ls/sed/rg single calls are auto-emulated (<5ms) so they work cross-platform, but dedicated tools save tokens. Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded-output `|` pipelines (two allowlisted segments only). Avoid unrelated chains, subshells/grouping, and `$()`; interactive REPL/vim and complex commands may require approval or are blocked by preflight. Large output is truncated with logFilePath: read it via read_file instead of re-running. Use `timeout_ms` for finite long-running builds/tests, and `WaitMsBeforeAsync` with the task manager for servers/watchers. Git mutations require explicit user request or approval; stage only explicit paths (`git add -- <paths>`, never -A/./wildcards unless the request is an explicit commit); pushes to main/master require approval; system-destructive commands are prohibited.',
         },
         CommandLine: {
           type: Type.STRING,
@@ -1342,7 +1418,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         },
         WaitMsBeforeAsync: {
           type: Type.INTEGER,
-          description: 'Wait time before moving the command to a background task (max 10000ms). Must use a value >0 (usually 5000) for long-running servers/watchers/daemons; then use `manage_task` to view logs or stop the task. For servers/watchers (dev server, --watch), this is applied automatically; for finite commands use `timeout_ms` for the synchronous run. Do not use this parameter as a timeout substitute for finite builds/tests. Background tasks run on the host process manager: they cannot preserve Docker isolation (BACKGROUND_ISOLATION_UNSUPPORTED) and network Git (fetch/pull/clone) cannot go background.',
+          description: 'Wait time before moving the command to a background task (max 10000ms). Must use a value >0 (usually 5000) for long-running servers/watchers/daemons; then use `manage_task` to view logs or stop the task. For servers/watchers (dev server, --watch), this is applied automatically; for finite commands use `timeout_ms` for the synchronous run. Do not use this parameter as a timeout substitute for finite builds/tests. Under Docker isolation a background task is dispatched with `docker exec`, so it stays inside the container; killing it stops only the exec client, so stop the in-container process itself when a server must really be terminated. Network Git (fetch/pull/clone) cannot go background.',
         },
         timeout_ms: {
           type: Type.NUMBER,
@@ -1545,8 +1621,12 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         }
       }
 
-      // Kiểm tra User Rule 2: Chặn tự động push lên main/master để bảo vệ CI/CD Railway
-      const blockedPushToMain = isBlockedGitPushToMain(effectiveCommand);
+      // Kiểm tra User Rule 2: Chặn tự động push lên main/master để bảo vệ CI/CD Railway.
+      // Both shapes: an explicit main destination in the text, and a bare `git push`
+      // whose destination is the checked-out branch (the .git/HEAD read is only for git).
+      const blockedPushToMain = /\bgit(?:\.exe)?\b/i.test(effectiveCommand)
+        && (isBlockedGitPushToMain(effectiveCommand)
+          || isCurrentBranchPushToMain(effectiveCommand, readCheckedOutBranch(workspace.rootDir)));
 
       // Bounded allowlisted pipelines (e.g. `npm test | head -n 20`, `git log --oneline | head -n 5`)
       // skip interactive approval and are not rejected as complex grouping.
@@ -1581,21 +1661,16 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
 
       const permArgs = { ...args, command: rawCommand, CommandLine: rawCommand };
 
-      // A file-tool misuse (cat/ls/grep/rm via shell) in a session with no
-      // approval channel can never be approved; skip the dead prompt and let
-      // the COMMAND_NOT_ALLOWED branch below redirect to the dedicated tool.
-      const misuseEarly = detectFileCommandMisuse(rawCommand);
-      const modeEarly = effectivePermissionManager?.getMode?.();
-      const skipDeadPrompt = Boolean(misuseEarly)
-        && !hasApprovalChannel(effectivePermissionManager)
-        && ['always_ask', 'ask_sensitive', 'read_only'].includes(String(modeEarly || ''));
-
-      if (needsApproval && !hasExplicitPermission && !skipDeadPrompt && effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
+      if (needsApproval && !hasExplicitPermission && effectivePermissionManager && typeof effectivePermissionManager.checkPermission === 'function') {
         const permCheck = await effectivePermissionManager.checkPermission('run_command', permArgs, context);
         if (permCheck.allowed) {
           hasExplicitPermission = true;
           if (context) context.permissionGranted = true;
-        } else if (shouldReturnPermissionDenial(effectivePermissionManager, permCheck)) {
+        } else if (shouldReturnPermissionDenial(effectivePermissionManager, permCheck)
+          // A file-tool misuse command (cat/ls/rm via shell) in a session with no
+          // approval channel can never be approved here; fall through so the
+          // COMMAND_NOT_ALLOWED branch below redirects to the dedicated tool.
+          && !(detectFileCommandMisuse(rawCommand) && !hasApprovalChannel(effectivePermissionManager))) {
           return {
             command: rawCommand,
             error: permCheck.reason || `Command "${rawCommand}" was rejected or has not been granted execution permission (PERMISSION APPROVAL).`,
@@ -1614,14 +1689,18 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           errorCode: 'COMMAND_PARSE_REJECTED',
         };
       }
-      if (blockedPushToMain && !hasExplicitPermission) {
+      // User Rule 2 is non-bypassable: a push whose destination is main/master
+      // never runs from the agent, approval or permission mode included. An
+      // approval only authorizes other commands, so this check sits outside
+      // hasExplicitPermission on purpose.
+      if (blockedPushToMain) {
         return {
           command: rawCommand,
-          error: 'OPERATION BLOCKED (User Rule 2): Never automatically git push to main/master to avoid triggering the automatic Railway CI/CD system. Requires a direct user request.',
+          error: 'OPERATION BLOCKED (User Rule 2): Never automatically git push to main/master to avoid triggering the automatic Railway CI/CD system. This is not lift-able by approval — push a feature branch, or let the user run the push to main themselves.',
           errorCode: 'PUSH_TO_MAIN_PROHIBITED',
-          suggestion: hasApprovalChannel(effectivePermissionManager)
-            ? 'Pushing to main requires a direct user request naming main explicitly — approval alone does not authorize it. Ask the user to approve permission (Permission Approval) only if pushing to main is truly intended.'
-            : 'Pushing to main requires a direct user request, and no approval channel is available in this session: retarget the push to the user-requested branch instead.',
+          processStarted: false,
+          commandOutcome: 'blocked_preflight',
+          suggestion: 'Push the work to a feature branch (`git push -u origin <branch>`) and open a pull request, or ask the user to run the push to main themselves.',
         };
       }
       // Workspace Security Sandbox: never let an approved command read or write
@@ -1753,8 +1832,10 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         // BackgroundTask spawns a host process; under isolation, dispatch a
         // `docker exec` client instead so auto never silently leaves the boundary.
         // shortcut: killing the task kills the docker exec client, not the
-        // in-container process group — upgrade: exec in-container via a PID file
-        // and `docker exec ... kill`, or kill the container on dispose.
+        // in-container process group — the result carries
+        // `containerProcessDetached` so `manage_task kill` is never read as proof
+        // the server stopped. Upgrade: exec in-container via a PID file and
+        // `docker exec ... kill`, or kill the container on dispose.
         let isolatedArgv: string[] | undefined;
         if (executionTarget === 'auto' && sandboxManager?.getStatus?.()?.isIsolated) {
           isolatedArgv = sandboxManager.getExecArgv?.(dispatchCommand, dispatchEnv);
@@ -1785,10 +1866,16 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           gates,
           ...(isolatedArgv ? { argv: isolatedArgv } : {}),
         });
+        const detachedNote: Record<string, any> = isolatedArgv
+          ? {
+            containerProcessDetached: true,
+            message: `Tool is running inside container via \`docker exec\` as background task ${bgTask.id}. A completion notice arrives when the exec client exits — do not poll. Note: killing this task stops only the exec client, not the in-container process; stop that process inside the container (or the container itself).`,
+          }
+          : {};
         const startTime = Date.now();
         if (longLived) {
           // Dev server/watcher không tự thoát — trả kết quả ngay; stall watchdog (45s) là lối thoát khi treo.
-          return buildBackgroundResult(bgTask, { longLived: true });
+          return buildBackgroundResult(bgTask, { longLived: true, ...detachedNote });
         }
         const deadline = startTime + effectiveWaitMs;
 
@@ -1821,11 +1908,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               commandOutcome,
               ...(typeof bgTask.exitCode === 'number' ? { exitCode: bgTask.exitCode } : {}),
             },
-            sandboxType: 'local',
+            sandboxType: isolatedArgv ? 'docker' : 'local',
           };
         }
 
-        return buildBackgroundResult(bgTask);
+        return buildBackgroundResult(bgTask, detachedNote);
       }
       // Tự động tối ưu hoá lệnh cat/type/head/tail đọc file bằng Node.js I/O (<2ms)
       const parsedCat = parseCatCommand(effectiveCommand);

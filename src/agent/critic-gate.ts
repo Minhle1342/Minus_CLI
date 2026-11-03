@@ -9,7 +9,7 @@ import { WorkspaceStateVerifier, type CleanlinessCheckResult } from '../workspac
 import { AuditLedger, type TaskAuditRecord } from './audit-ledger.js';
 import { CodeSyntaxValidator } from '../workspace/syntax-diagnostics.js';
 import { isScratchPath } from '../skills/verification-policy.js';
-import { detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent } from './final-answer-guard.js';
+import { referencesWorkspaceCode } from './final-answer-guard.js';
 import { detectLeadingQuery } from './cognitive-harness.js';
 import { isSensitivePath, resolveVerifyTier } from './verify-tier-resolver.js';
 
@@ -230,19 +230,20 @@ export class CriticGate {
     const { userRequest, session } = params;
     if (!userRequest) return { allowed: true, scorePenalty: 0, reasons: [] };
 
-    const isArch = detectArchitectureAnalysisIntent(userRequest).isArchitectureQuery;
-    const isAnalysis = detectAnalysisOrInvestigationIntent(userRequest).isAnalysisQuery;
-    const isLeading = detectLeadingQuery(userRequest).isLeading;
-
-    if (!isArch && !isAnalysis && !isLeading) {
-      return { allowed: true, scorePenalty: 0, reasons: [] };
-    }
-
     const inspectedFiles = extractInspectedFilesFromSession(session, params.turn);
     const nonScratchInspected = Array.from(inspectedFiles).filter((f) => !isScratchPath(f));
     const hasStructuralEvidence = collectCompletionObservations(session, params.turn).some((item) =>
       ['analyze_impact', 'query_call_graph', 'get_symbol_context_360', 'inspect_symbol'].includes(item.toolName)
       && !isToolResultFailure(item.payload));
+    const isLeading = detectLeadingQuery(userRequest).isLeading;
+    // Trigger on observable evidence instead of guessing the user's intent: the
+    // answer makes code claims, or the turn already inspected/queried code.
+    const answerReferencesCode = referencesWorkspaceCode(params.finalAnswer ?? '');
+
+    if (!answerReferencesCode && nonScratchInspected.length === 0 && !hasStructuralEvidence && !isLeading) {
+      return { allowed: true, scorePenalty: 0, reasons: [] };
+    }
+
     const reasons: string[] = [];
     let scorePenalty = 0;
 
@@ -252,7 +253,7 @@ export class CriticGate {
       reasons.push(
         'EXPLORATION_EXHAUSTED_ZERO_EVIDENCE: Answering an architecture or defect investigation query requires inspecting source files or call-graph context (read_file, GitNexus context/query) before drawing conclusions.',
       );
-    } else if (nonScratchInspected.length === 1 && !hasStructuralEvidence && (isAnalysis || isLeading)) {
+    } else if (nonScratchInspected.length === 1 && !hasStructuralEvidence && (answerReferencesCode || isLeading)) {
       // Single-File Satisficing / Premature Closure Invariant
       scorePenalty += 20;
       reasons.push(
@@ -260,9 +261,8 @@ export class CriticGate {
       );
     }
 
-    // ponytail: architecture intent detection is heuristic; default completion
-    // flow keeps this advisory. Callers that explicitly opt into enforce retain
-    // the old rejection threshold.
+    // ponytail: default completion flow keeps this advisory. Callers that
+    // explicitly opt into enforce retain the old rejection threshold.
     const allowed = params.gateMode !== 'enforce' || scorePenalty < 30;
     return {
       allowed,

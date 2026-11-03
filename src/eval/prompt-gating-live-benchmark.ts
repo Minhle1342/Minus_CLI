@@ -98,12 +98,12 @@ function deterministicRequiredBlockRecall(): number {
     confidence: 0.95, fastPath: false, reasonCodes: [], createdAt: new Date(0).toISOString(), ...overrides,
   });
   const cases = [
-    { input: { ...base, activeStepQuery: 'architecture topology dependency call graph', classification: classification() }, required: ['architecture'] },
-    { input: { ...base, activeStepQuery: 'debug root cause failure', classification: classification({ taskClass: 'bugfix', requiredCapabilities: ['inspect', 'edit'] }), harnessProfileName: 'strict-verification' }, required: ['rootCause', 'harness', 'scaffold'] },
-    { input: { ...base, activeStepQuery: 'implement patch', classification: classification({ taskClass: 'feature', phase: 'implement', requiredCapabilities: ['edit'] }), harnessProfileName: 'velocity-first' }, required: ['mutation', 'harness'] },
-    { input: { ...base, activeStepQuery: 'poll background server task', classification: classification(), lastToolName: 'manage_task', lastToolResult: { status: 'running' } }, required: ['longTask'] },
-    { input: { ...base, activeStepQuery: 'delegate parallel subagent review', classification: classification({ requiredCapabilities: ['delegate'] }) }, required: ['subagent'] },
-    { input: { ...base, activeStepQuery: 'execute active plan', classification: classification({ phase: 'plan', requiredCapabilities: ['plan'] }), planRequired: true, hasPlan: true, planIncomplete: true }, required: ['dagPlan', 'plan'] },
+    { input: { ...base, activeStepQuery: 'architecture topology dependency call graph', classification: classification() }, required: [] },
+    { input: { ...base, activeStepQuery: 'debug root cause failure', classification: classification({ taskClass: 'bugfix', requiredCapabilities: ['inspect', 'edit'] }), harnessProfileName: 'strict-verification' }, required: ['harness', 'scaffold'] },
+    { input: { ...base, activeStepQuery: 'implement patch', classification: classification({ taskClass: 'feature', phase: 'implement', requiredCapabilities: ['edit'] }), harnessProfileName: 'velocity-first' }, required: ['harness'] },
+    { input: { ...base, activeStepQuery: 'poll background server task', classification: classification(), lastToolName: 'manage_task', lastToolResult: { status: 'running' } }, required: [] },
+    { input: { ...base, activeStepQuery: 'delegate parallel subagent review', classification: classification({ requiredCapabilities: ['delegate'] }) }, required: [] },
+    { input: { ...base, activeStepQuery: 'execute active plan', classification: classification({ phase: 'plan', requiredCapabilities: ['plan'] }), planRequired: true, hasPlan: true, planIncomplete: true }, required: ['plan'] },
   ];
   let expected = 0;
   let recalled = 0;

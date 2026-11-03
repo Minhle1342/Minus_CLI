@@ -38,7 +38,7 @@ import { ProcessFailureDetector } from './process-failure-detector.js';
 import { DomainIntentGuardian } from './domain-intent-guardian.js';
 import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, collectCompletionObservations, toolResultFailed } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
-import { FinalAnswerGuard, detectArchitectureAnalysisIntent, detectAnalysisOrInvestigationIntent, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
+import { FinalAnswerGuard, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath, isCommentOnlyChange } from '../skills/verification-policy.js';
@@ -66,7 +66,7 @@ import type { ClassificationDecision, ToolControlMode } from '../control/classif
 import { ThisTurnToolGate, createToolSurface, hashAllowedToolSet } from '../control/this-turn-tool-gate.js';
 import { EDIT_TOOL_NAMES, READ_TOOL_NAMES, ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
 import { checkPhaseToolEffect, isOrchestrationTool } from '../control/phase-tool-effects.js';
-import { gatesFromPermissionManager } from '../security/full-access-gates.js';
+import { gatesFromPermissionManager, type GateReader, type FullAccessGate } from '../security/full-access-gates.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
 import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/typescript-service.js';
@@ -1321,7 +1321,16 @@ export class AgentLoop {
     const toolControlMode: ToolControlMode = ['off', 'shadow', 'enforce'].includes(configuredControlMode)
       ? configuredControlMode as ToolControlMode
       : 'shadow';
-    const fullAccessGates = gatesFromPermissionManager(this.kernel?.ctx.permissions ?? this.toolRunner.getPermissionManager());
+    const rawFullAccessGates = gatesFromPermissionManager(this.kernel?.ctx.permissions ?? this.toolRunner.getPermissionManager());
+    const fullAccessGates: GateReader = (gate: FullAccessGate) => {
+      if (gate === 'phase_masking') {
+        if (process.env.MINUS_STRICT_PHASE_MASKING === 'true' || process.env.MINUS_STRICT_PHASE_MASKING === '1') {
+          return rawFullAccessGates(gate);
+        }
+        return true;
+      }
+      return rawFullAccessGates(gate);
+    };
     const batchPersistenceEnabled = this.loopOptions?.enableBatchSessionPersistence
       ?? envFeatureEnabled('MINUS_BATCH_SESSION_PERSISTENCE');
     if (toolControlMode === 'enforce') {
@@ -1431,15 +1440,7 @@ export class AgentLoop {
           } else if (!isFinite(effectiveMaxSteps)) {
             prefix += `[DYNAMIC CONVERGENCE ACTIVE - UNBOUNDED EXECUTION]:\nYou are operating in dynamic convergence mode without arbitrary step limits. Continue executing tools, inspecting, coding, and verifying results until the task is completely achieved and empirically verified. Do not stop prematurely.\n\n`;
           }
-          if (resolveStepPromptGatingMode(this.loopOptions?.stepPromptGatingMode) !== 'enforce') {
-            const initialScaffold = this.cognitiveHarness.createScaffold({
-              request: userText,
-              phase: 'explore',
-              hasAttachments: hasAttachmentAnchors,
-              anchorPaths: attachmentAnchors,
-            });
-            prefix += `${this.cognitiveHarness.formatScaffoldForPrompt(initialScaffold)}\n\n`;
-          }
+          // Cognitive Scaffold warm-start injection removed per policy guidance
           const rewrittenHistory = history.map((message, index) =>
             index === 0
               ? { ...message, parts: [{ text: `${prefix}[USER INSTRUCTION]:\n${userText}` }] }
@@ -1649,11 +1650,7 @@ export class AgentLoop {
           taskClass: classification.taskClass,
           phase: classification.phase,
           hasPlan: this.planManager.hasPlan(),
-          evidenceGateMode: configuredEvidenceGateMode()
-            // Item 14: light refactors (R0-R2) observe instead of enforcing; the
-            // Pareto gate still advises, it just stops hard-blocking them.
-            || (classification.taskClass === 'refactor' && ['R0', 'R1', 'R2'].includes(classification.risk)
-              ? 'observe' : 'enforce'),
+          evidenceGateMode: configuredEvidenceGateMode() || 'observe',
           hasValidatedHypothesis,
           supportedHypothesisCount,
           targetFiles: [
@@ -2095,8 +2092,8 @@ export class AgentLoop {
             advicePrompt: candidateAdvicePrompt,
             advicePlaybook: adviceInfo.playbook,
             harnessGuidance: harnessProfile.guidance,
-            scaffoldPrompt: compactScaffoldPrompt,
-            legacyScaffoldPrompt,
+            scaffoldPrompt: '',
+            legacyScaffoldPrompt: '',
           },
         }, stepPromptMode);
         session.append('control/decision', {
@@ -2383,8 +2380,7 @@ export class AgentLoop {
           || (consecutiveFails >= 2 ? (baselineRisk === 'CRITICAL' ? 'CRITICAL' : 'HIGH') : baselineRisk);
 
         const isInvestigativeExplore = (classification.phase === 'explore' || (classification.phase as string) === 'investigate') && (
-          detectAnalysisOrInvestigationIntent(turnUserRequest).isAnalysisQuery
-          || detectLeadingQuery(turnUserRequest).isLeading
+          detectLeadingQuery(turnUserRequest).isLeading
           || classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
         );
 
@@ -2422,7 +2418,6 @@ export class AgentLoop {
 
         const hypothesisContext = this.hypothesisTracker.toScratchpad();
         const hypothesisGuidance = this.hypothesisTracker.toPromptGuidance();
-        const domainContractContext = this.domainIntentGuardian.formatContractForPromptContext();
         // Retain the handoff across subsequent steps: a boundary compaction can mask
         // the underlying observations in model history, while the phase event remains durable.
         const phaseHandoff = buildPhaseContextHandoff(
@@ -2440,11 +2435,8 @@ export class AgentLoop {
         const historyHasWarmScaffold = historyZeroText.includes('[COGNITIVE SCAFFOLD ACTIVE');
         const historyHasWarmMemory = historyZeroText.includes('[SESSION / GOAL MEMORY');
 
-        // 1. Khử trùng lặp Cognitive Scaffold: Nếu history[0] đã chứa khung System 2 từ Warm-Start
-        // và không có lỗi liên tiếp (consecutiveFails < 2), thì tại Step 1 không nạp lại ở đuôi dynamic context.
-        const effectiveScaffoldText = (step === 1 && historyHasWarmScaffold && consecutiveFails < 2)
-          ? undefined
-          : cognitiveScaffoldText;
+        // Cognitive Scaffold removed per policy guidance
+        const effectiveScaffoldText = undefined;
 
         // 2. Khử trùng lặp Project Memory: Nếu history[0] đã chứa [SESSION / GOAL MEMORY],
         // thì tại Step 1 các mục memory insight đã được nạp ở đầu tin nhắn.
@@ -2557,7 +2549,6 @@ export class AgentLoop {
           testVerificationEncouragement,
           reflectionContext,
           strongAdvisory: promptDecision.strongAdvisoryPrompt,
-          cognitiveScaffold: resendIfNew(trimmedScaffoldText),
           warmStartTopoMap: trimmedWarmStartTopoMap,
           toolPlaybooks: trimmedToolPlaybooks,
           gitPlaybook: trimmedGitPlaybook,
@@ -2568,7 +2559,6 @@ export class AgentLoop {
           epistemicVerdictContext,
           hypothesisContext: resendIfNew(hypothesisContext),
           hypothesisGuidance,
-          domainContractContext,
           paretoGateReminder,
           phaseGuidance: [phaseGuidance, this.verificationPolicy.formatVerificationGuidance({
             hasCallers: this.editTouchedCallers, blastRisk: this.maxEditBlastRisk,
@@ -3185,11 +3175,6 @@ export class AgentLoop {
             this.eventBus?.emit('model:thought', response.reasoningContent, { sessionId: session.id });
           }
 
-          // Wink-Style Specification Drift & Goal Substitution Nudge
-          const thoughtDrift = this.domainIntentGuardian.observeModelThoughts(response.reasoningContent);
-          if (thoughtDrift) {
-            CLI.renderReflectionAlert(1, `[Wink Course-Correction Nudge]: ${thoughtDrift.message}`);
-          }
         }
 
         const hasToolCalls = Boolean(response.toolCalls && response.toolCalls.length > 0);
@@ -4660,9 +4645,8 @@ export class AgentLoop {
               ? commandForAttribution
               : String(toolArgs?.command || toolArgs?.script || toolArgs?.code || toolArgs?.filePath || '');
             const isVerifOrReproCommand = isVerificationCommand(cmdStr)
-              || /(?:node|tsx|npx\s+tsx|python(?:3)?(?:\.exe)?|pytest|cargo|go|dotnet)\b.*(?:scratch|repro|test)/i.test(cmdStr)
-              || (toolName === 'run_node_script' && /(?:scratch|repro|test)/i.test(cmdStr));
-            if ((toolName === 'run_command' || toolName === 'run_node_script') && isVerifOrReproCommand) {
+              || /(?:node|tsx|npx\s+tsx|python(?:3)?(?:\.exe)?|pytest|cargo|go|dotnet)\b.*(?:scratch|repro|test)/i.test(cmdStr);
+            if (toolName === 'run_command' && isVerifOrReproCommand) {
               const isFailure = typeof executionResult.result?.exitCode === 'number'
                 && executionResult.result.exitCode !== 0
                 && executionResult.result?.processStarted !== false
@@ -4869,7 +4853,6 @@ export class AgentLoop {
           // submit_solution already contains a comprehensive, evidence-backed
           // summary. Reusing it avoids an otherwise redundant provider request
           // whose only purpose is to restate the same result.
-          const isArchQuery = detectArchitectureAnalysisIntent(turnUserRequest).isArchitectureQuery;
           const isSummarySufficient = isComprehensiveSubmissionSummary(submittedSolutionSummary || '');
           const enableSubmitAutoFinalization = this.loopOptions?.enableSubmitAutoFinalization
             ?? envFeatureEnabled('MINUS_SUBMIT_AUTO_FINALIZATION', true);
@@ -4881,7 +4864,6 @@ export class AgentLoop {
             || this.inbox.hasPendingKind(session.id, 'background-task'));
           if (
             !bgPendingAtFinalize
-            && (!isArchQuery || isReadOnlySubmission || submittedValidatedDraft)
             && hasSubmittedSolution
             && submittedSolutionSummary
             && (isSummarySufficient || isReadOnlySubmission || postSubmissionBlocked || submittedValidatedDraft)

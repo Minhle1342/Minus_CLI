@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { createRunCommandTool } from './run-command.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -29,7 +32,7 @@ test('background dispatch keeps the Docker boundary through docker exec argv', a
   assert.deepEqual(captured.argv.slice(0, 4), ['docker', 'exec', '-i', 'abc123']);
 });
 
-test('no approval channel: shell file-misuse skips the dead prompt and redirects to the tool', async () => {
+test('no approval channel: shell file-misuse redirects to the dedicated tool, not a bare denial', async () => {
   let prompted = 0;
   const permissionManager = {
     getMode: () => 'always_ask',
@@ -39,9 +42,28 @@ test('no approval channel: shell file-misuse skips the dead prompt and redirects
   const result = await createRunCommandTool(undefined, undefined, permissionManager).execute(
     { command: 'cat src/a.ts && ./run-custom.sh' }, new Workspace(), {},
   );
-  assert.equal(prompted, 0);
+  // The session is still asked (it may grant); only an unapprovable denial is
+  // allowed to fall through to the tool redirect.
+  assert.equal(prompted, 1);
   assert.equal(result.errorCode, 'COMMAND_NOT_ALLOWED');
   assert.match(String(result.suggestion), /read_file/);
+});
+
+test('a granted file-misuse command is dispatched, not refused with COMMAND_NOT_ALLOWED', async () => {
+  let prompted = 0;
+  const grantingManager = {
+    getMode: () => 'always_ask',
+    hasApprovalChannel: () => false,
+    checkPermission: async () => { prompted++; return { allowed: true, permissionGranted: true }; },
+  } as any;
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'minus-misuse-'));
+  const result = await createRunCommandTool(undefined, undefined, grantingManager).execute(
+    { command: 'cat missing-a.ts && ./missing-script.sh' }, new Workspace(root), {},
+  );
+  // The prompt is what authorized this run; skipping it turned an approvable
+  // command into a hard refusal.
+  assert.equal(prompted, 1);
+  assert.notEqual(result.errorCode, 'COMMAND_NOT_ALLOWED');
 });
 
 test('auto background dispatch refuses to cross an available Docker boundary', async () => {

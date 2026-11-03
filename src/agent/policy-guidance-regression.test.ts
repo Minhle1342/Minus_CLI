@@ -140,7 +140,7 @@ test('plugin dispose preserves unrelated prompt sections', async () => {
 
 test('Git capability recovery uses the available shell without expanding authorization', () => {
   const result = new FinalAnswerGuard().evaluate('I cannot access git tools to commit changes.',
-    {userRequest:'Commit these changes',availableToolNames:['run_command']});
+    {userRequest:'git commit these changes',availableToolNames:['run_command']});
   assert.equal(result.reason,'unverified-capability-denial');
   assert.match(result.continuationPrompt || '',/run_command/);
   assert.match(result.continuationPrompt || '',/user-authorized/);

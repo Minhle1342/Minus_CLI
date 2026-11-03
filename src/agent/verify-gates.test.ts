@@ -129,7 +129,7 @@ test('critic keeps zero-inspection architecture evidence advisory by default', (
   record(session, 1, 'get_diagnostics', {}, { success: true, clean: true, totalErrors: 0 });
   const critic = new CriticGate();
   const decision = critic.evaluate({
-    finalAnswer: 'The parser transforms input into nodes.',
+    finalAnswer: 'src/parser.ts transforms input into nodes.',
     session,
     workspace: {} as any,
     userRequest: 'Explain the parser architecture',

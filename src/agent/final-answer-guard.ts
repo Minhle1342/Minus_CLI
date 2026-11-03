@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { detectExplicitGitMutationIntent, normalizeIntentText } from '../tools/git-intent.js';
-import { detectExplicitGitCommandNames, parseGitInvocation } from '../tools/git-command-policy.js';
+
+import { detectExplicitGitCommandNames, normalizeIntentText, parseGitInvocation } from '../tools/git-command-policy.js';
 import { toolResultFailed } from './completion-observations.js';
 
 export type FinalAnswerGuardRejectionReason =
@@ -10,7 +10,6 @@ export type FinalAnswerGuardRejectionReason =
   | 'empty-answer'
   | 'insufficient-architecture-answer'
   | 'unverified-architecture-claims'
-  | 'insufficient-analysis-answer'
   | 'curt-final-answer'
   | 'system-prompt-echo'
   | 'insecure-code-confidence';
@@ -185,9 +184,12 @@ export function isSystemPromptEcho(answer: string): boolean {
   return stripped.length * 3 < trimmed.length;
 }
 
-const CAPABILITY_DENIAL_PATTERNS = [  /\b(?:i am|im|were|we are)?\s*(?:unable|not able)\s+to\b/,
+const CAPABILITY_DENIAL_PATTERNS = [
+  /\b(?:i am|im|were|we are)?\s*(?:unable|not able)\s+to\b/,
   /\b(?:i|we)\s+(?:cannot|cant|dont have|do not have|lack)\b/,
-  /\b(?:khong the|khong co|thieu)\b/,
+  // Only a first-person inability/permission claim denies capability.
+  // Bare "khong co" (e.g. "khong co conflict") is ordinary factual reporting.
+  /\b(?:khong the|khong co quyen|thieu quyen|thieu cong cu|thieu tool)\b/,
 ];
 
 /**
@@ -273,23 +275,19 @@ export class FinalAnswerGuard {
     const gitDenial = this.evaluateGitCapabilityDenial(normalized, context);
     if (gitDenial) return gitDenial;
 
-    // 4. Kiểm định tính chuyên sâu, có cấu trúc và đúng sự thật cho query kiến trúc / workflow / pattern
+    // 4. Kiểm tra dẫn chứng file có thật cho mọi câu trả lời (mechanical grounding)
     const archDecision = evaluateArchitectureAnalysis(answer, context);
     if (archDecision && !archDecision.allow) return archDecision;
 
-    // 5. Kiểm định tính chuyên sâu cho query điều tra nguyên nhân / phân tích sự cố
-    const analysisDecision = evaluateAnalysisOrInvestigationAnswer(answer, context);
-    if (analysisDecision && !analysisDecision.allow) return analysisDecision;
-
-    // 5b. Chặn câu trả lời cộc lốc / cụt ngủn cho tác vụ đã hoàn tất hoặc có can thiệp mã nguồn
+    // 5. Chặn câu trả lời cộc lốc / cụt ngủn cho tác vụ đã hoàn tất hoặc có can thiệp mã nguồn
     const curtDecision = evaluateCurtFinalAnswer(answer, context);
     if (curtDecision && !curtDecision.allow) return curtDecision;
 
-    // 5c. Kiểm soát Ảo giác ở cấp độ Bảo mật: Chặn Tự tin thái quá vào code nhiễm độc (Insecure Code Confidence)
+    // 5b. Kiểm soát Ảo giác ở cấp độ Bảo mật: Chặn Tự tin thái quá vào code nhiễm độc (Insecure Code Confidence)
     const securityDecision = evaluateInsecureCodeConfidence(answer, context);
     if (securityDecision) return securityDecision;
 
-    const advisories = [archDecision, analysisDecision, curtDecision].flatMap((d) => d?.advisories || []);
+    const advisories = [archDecision, curtDecision].flatMap((d) => d?.advisories || []);
     return { allow: true, ...(advisories.length ? { advisories } : {}) };
   }
 
@@ -297,13 +295,8 @@ export class FinalAnswerGuard {
     normalizedAnswer: string,
     context?: FinalAnswerGuardContext,
   ): FinalAnswerGuardDecision | undefined {
-    const intent = detectExplicitGitMutationIntent(context?.userRequest);
     const commandNames = detectExplicitGitCommandNames(context?.userRequest);
-    const requestedTools = new Set([
-      ...(intent.stage && !intent.commit ? ['git_add'] : []),
-      ...(intent.commit ? ['git_commit'] : []),
-      ...(intent.push ? ['git_push'] : []),
-    ]);
+    const requestedTools = new Set<string>();
     const dedicatedCommands: Record<string, string> = {
       add: 'git_add',
       commit: 'git_commit',
@@ -347,94 +340,6 @@ export class FinalAnswerGuard {
       ].join('\n'),
     };
   }
-}
-
-export type ArchitectureCategory = 'architecture' | 'workflow' | 'pattern' | 'mechanism' | 'business';
-
-export interface ArchitectureIntentResult {
-  isArchitectureQuery: boolean;
-  categories: ArchitectureCategory[];
-}
-
-export function detectArchitectureAnalysisIntent(userRequest?: string): ArchitectureIntentResult {
-  if (!userRequest || typeof userRequest !== 'string') {
-    return { isArchitectureQuery: false, categories: [] };
-  }
-
-  const normalized = normalizeForMatching(userRequest);
-  const categories = new Set<ArchitectureCategory>();
-
-  // 1. Nhóm từ khóa hành vi phân tích chuyên sâu (Loại bỏ các động từ tác vụ thường ngày như "kiem tra", "inspect", "mo ta")
-  const hasAnalyticalAction =
-    /\b(?:phan tich|giai thich|tim hieu|khao sat|tong quan|trinh bay|analyze|explain|breakdown|trace|explore|understand|overview|walkthrough)\b/.test(
-      normalized,
-    ) || /\b(?:hoat dong nhu the nao|hoat dong the nao|van hanh the nao|to chuc nhu the nao|how does .* work|how it works)\b/.test(
-      normalized,
-    );
-
-  // 2. Nhóm Kiến trúc (Architecture / System Topology)
-  if (
-    /\b(?:kien truc|kien truc he thong|cau truc he thong|kien truc tong the|architecture|system design|system architecture|software architecture|architectural|topology)\b/.test(
-      normalized,
-    )
-  ) {
-    categories.add('architecture');
-  }
-
-  // 3. Nhóm Workflow & Luồng dữ liệu (Workflow / Dataflow / Execution trace)
-  // Chỉ khớp các cụm luồng cụ thể, tránh khớp chữ "luong" đứng đơn lẻ (gây bắt nhầm số lượng, chất lượng, âm lượng, lưu lượng)
-  if (
-    /\b(?:workflow|luong hoat dong|luong thuc thi|luong du lieu|luong xu ly|luong goi|dataflow|data flow|execution flow|call flow|call graph|lifecycle|execution trace)\b/.test(
-      normalized,
-    )
-  ) {
-    categories.add('workflow');
-  }
-
-  // 4. Nhóm Mẫu thiết kế (Design Patterns)
-  if (
-    /\b(?:pattern|design pattern|mau thiet ke|mo hinh thiet ke|creational pattern|structural pattern|behavioral pattern)\b/.test(
-      normalized,
-    )
-  ) {
-    categories.add('pattern');
-  }
-
-  // 5. Nhóm Cơ chế (Mechanisms)
-  if (
-    /\b(?:co che|co che hoat dong|co che van hanh|co che ben trong|internal mechanism|mechanism|engine mechanism)\b/.test(
-      normalized,
-    )
-  ) {
-    categories.add('mechanism');
-  }
-
-  // 6. Nhóm Nghiệp vụ (Business Mechanisms / Domain logic)
-  if (
-    /\b(?:nghiep vu|logic nghiep vu|business logic|business mechanism|domain model|domain logic)\b/.test(
-      normalized,
-    )
-  ) {
-    categories.add('business');
-  }
-
-  // Nếu câu chứa tác vụ sửa lỗi / debug / đo đạc / hiệu năng cụ thể và KHÔNG có từ khóa kiến trúc hệ thống rõ ràng,
-  // thì đó là tác vụ kỹ thuật thông thường, không phải bài luận phân tích kiến trúc.
-  const isBugOrTechnicalTask =
-    /\b(?:sua|fix|debug|loi|error|crash|latency|cham|slow|commit|patch|update|refactor|benchmark)\b/.test(
-      normalized,
-    );
-  if (isBugOrTechnicalTask && !categories.has('architecture')) {
-    return { isArchitectureQuery: false, categories: Array.from(categories) };
-  }
-
-  // Query được coi là query phân tích kiến trúc khi có từ 2 danh mục trở lên HOẶC có 1 danh mục đi kèm hành động phân tích/giải thích/walkthrough
-  const isArchitectureQuery = categories.size >= 2 || (categories.size >= 1 && hasAnalyticalAction);
-
-  return {
-    isArchitectureQuery,
-    categories: Array.from(categories),
-  };
 }
 
 export interface GroundingVerificationResult {
@@ -503,11 +408,25 @@ export function verifyWorkspaceGrounding(
   };
 }
 
-/** Citation existence is a mechanical check, not a claim that the prose is true. */
+/**
+ * Mechanical signal that an answer talks about repository source, not about
+ * the user's intent: it names a file path, contains a code fence, or declares
+ * a code symbol. Used where a prose-intent guess used to decide whether to
+ * force evidence.
+ */
+export function referencesWorkspaceCode(answer: string): boolean {
+  if (!answer) return false;
+  return /```|~~~|(?:[\w.-]+[\\/])+[\w.-]+\.[a-zA-Z0-9]+|\b(?:function|class|interface)\s+[A-Za-z_$]|\b(?:import|export)\s+[A-Za-z_${*]/.test(answer);
+}
+
+/**
+ * Citation existence is a mechanical check, not a claim that the prose is true.
+ * It runs on every answer: a false file citation is wrong regardless of what
+ * the user's prose looked like.
+ */
 export function evaluateArchitectureAnalysis(
   answer: string, context?: FinalAnswerGuardContext,
 ): FinalAnswerGuardDecision | undefined {
-  if (!detectArchitectureAnalysisIntent(context?.userRequest).isArchitectureQuery) return undefined;
   const grounding = verifyWorkspaceGrounding(answer, context?.workspace);
   if (grounding.invalidFiles.length) {
     if (grounding.validFiles.length >= 2 && grounding.validFiles.length > grounding.invalidFiles.length) {
@@ -520,9 +439,6 @@ export function evaluateArchitectureAnalysis(
       allow: false, reason: 'unverified-architecture-claims', recovery: 'inspect-evidence',
       continuationPrompt: `[SYSTEM SOURCE CHECK]: ${grounding.reasons.join(' ')} Correct the citations using existing evidence, inspect the specific missing source if necessary, or label hypothetical paths as proposals. No minimum length or fixed outline is required.`,
     };
-  }
-  if (!grounding.validFiles.length && context?.workspace) {
-    return { allow: true, advisories: ['Anchor important repository claims in inspected code or reliable context; use the detail and format requested by the user.'] };
   }
   return undefined;
 }
@@ -595,81 +511,6 @@ function deriveGitEquivalentTools(
   return [];
 }
 
-export interface AnalysisIntentResult {
-  isAnalysisQuery: boolean;
-  categories: string[];
-}
-
-export function detectAnalysisOrInvestigationIntent(userRequest?: string): AnalysisIntentResult {
-  if (!userRequest || typeof userRequest !== 'string') {
-    return { isAnalysisQuery: false, categories: [] };
-  }
-
-  const normalized = normalizeForMatching(userRequest);
-  const categories: string[] = [];
-
-  // 1. Nhóm mục tiêu điều tra nguyên nhân / sự cố / bug / bất cập
-  const hasInvestigationTarget = /\b(?:nguyen nhan|vi sao|tai sao|ly do|loi|bug|van de|issue|su co|tiem an|diem yeu|bat cap|cause|root cause|why)\b/.test(
-    normalized,
-  );
-
-  // 1b. Nhóm câu hỏi trực diện về nguyên nhân / lý do ("Tại sao...", "Vì sao...", "Lý do gì...", "Nguyên nhân khiến...")
-  const hasDirectWhyQuestion = /\b(?:tai sao|vi sao|ly do (?:gi|nao|khien)?|nguyen nhan (?:gi|nao|khien)?|tai vi sao|how come)\b/.test(
-    normalized,
-  );
-
-  // 1c. Nhóm sự cố không hoạt động / không hiển thị / lỗi giao diện hoặc logic
-  const hasMalfunctionTarget = /\b(?:khong (?:hien thi|hoat dong|chay|goi y|click|bam|nhan|an|chuyen|load|tai|tim thay)|bi (?:loi|treo|an|mat|crash|freeze)|not (?:showing|working|displaying|rendering|suggesting))\b/.test(
-    normalized,
-  );
-
-  // 2. Nhóm hành động phân tích / khảo sát / tìm hiểu / kiểm tra
-  const hasAnalyticalAction = /\b(?:phan tich|giai thich|tim hieu|khao sat|dieu tra|xac dinh|tim|kiem tra|soi|nghiem thu|audit|inspect|investigate|diagnose|find|analyze|explain|report|breakdown)\b/.test(
-    normalized,
-  );
-
-  // 3. Nhóm yêu cầu báo cáo / trình bày chi tiết
-  const requestsDetailedReport = /\b(?:bao cao|trinh bay|chi tiet|day du|report|in detail|detailed)\b/.test(
-    normalized,
-  );
-
-  if (hasDirectWhyQuestion) {
-    categories.push('direct-why-question');
-  }
-  if (hasInvestigationTarget && hasAnalyticalAction) {
-    categories.push('root-cause-investigation');
-  }
-  if (hasMalfunctionTarget) {
-    categories.push('malfunction-investigation');
-  }
-  if (requestsDetailedReport && hasAnalyticalAction) {
-    categories.push('detailed-report');
-  }
-
-  // Nếu người dùng yêu cầu sửa mã trực tiếp và không yêu cầu báo cáo chi tiết
-  const isDirectCodeFixRequest = /\b(?:sua loi|fix loi|fix bug|viet code|viet ham|code giup|chinh sua file|sua file|tao file|thay the)\b/.test(
-    normalized,
-  ) && !requestsDetailedReport;
-
-  const isAnalysisQuery = categories.length > 0 && !isDirectCodeFixRequest;
-
-  return {
-    isAnalysisQuery,
-    categories,
-  };
-}
-
-export function evaluateAnalysisOrInvestigationAnswer(
-  answer: string, context?: FinalAnswerGuardContext,
-): FinalAnswerGuardDecision | undefined {
-  if (!detectAnalysisOrInvestigationIntent(context?.userRequest).isAnalysisQuery) return undefined;
-  if (isCompletionStub(answer)) {
-    return { allow: false, reason: 'insufficient-analysis-answer', recovery: 'revise-answer',
-      continuationPrompt: '[SYSTEM ANALYSIS GUARD]: Provide the findings themselves. Distinguish confirmed causes, hypotheses, and remaining uncertainty; a concise answer is valid.' };
-  }
-  return undefined;
-}
-
 export function evaluateCurtFinalAnswer(
   answer: string, context?: FinalAnswerGuardContext,
 ): FinalAnswerGuardDecision | undefined {
@@ -677,14 +518,6 @@ export function evaluateCurtFinalAnswer(
   if (!isCompletionStub(answer)) return undefined;
   return { allow: false, reason: 'curt-final-answer', recovery: 'revise-answer',
     continuationPrompt: '[SYSTEM QUALITY GUARD]: State the concrete outcome and relevant verification status, using the level of detail requested by the user.' };
-}
-
-export function detectSecurityAuditIntent(userRequest?: string): boolean {
-  if (!userRequest || typeof userRequest !== 'string') return false;
-  const normalized = normalizeForMatching(userRequest);
-  return /\b(?:audit|kiem tra bao mat|quet lo hong|security audit|security review|vulnerability scan|pentest|tim lo hong|tim bug bao mat|kiem thu bao mat)\b/.test(
-    normalized,
-  );
 }
 
 export function claimsAbsoluteSecurity(text: string): boolean {
@@ -784,31 +617,25 @@ function isTestOrDocFile(filePath: string): boolean {
  * nhưng lại khẳng định tuyệt đối là code hoàn toàn an toàn / đã tối ưu bảo mật.
  *
  * Tiêu chí nới lỏng linh hoạt (Non-Pedantic):
- * 1. Bỏ qua nếu query của user là audit / pentest / security review.
- * 2. Chỉ kích hoạt khi Agent đưa ra tuyên bố an toàn tuyệt đối (claimsAbsoluteSecurity).
- * 3. Miễn trừ nếu Agent có kèm Security Disclaimer / cảnh báo rủi ro trung thực.
- * 4. Miễn trừ các file kiểm thử (test, tests, scratch) và dummy tokens.
+ * 1. Chỉ kích hoạt khi Agent đưa ra tuyên bố an toàn tuyệt đối (claimsAbsoluteSecurity).
+ * 2. Miễn trừ nếu Agent có kèm Security Disclaimer / cảnh báo rủi ro trung thực.
+ * 3. Miễn trừ các file kiểm thử (test, tests, scratch) và dummy tokens.
  */
 export function evaluateInsecureCodeConfidence(
   answer: string,
   context?: FinalAnswerGuardContext,
 ): FinalAnswerGuardDecision | undefined {
-  // 1. Miễn trừ nếu người dùng yêu cầu security audit / pentest / scan lỗ hổng
-  if (detectSecurityAuditIntent(context?.userRequest)) {
-    return undefined;
-  }
-
-  // 2. Fast Path: Nếu Agent không đưa ra khẳng định an toàn tuyệt đối, bỏ qua ngay
+  // 1. Fast Path: Nếu Agent không đưa ra khẳng định an toàn tuyệt đối, bỏ qua ngay
   if (!claimsAbsoluteSecurity(answer)) {
     return undefined;
   }
 
-  // 3. Miễn trừ nếu Agent có cảnh báo / disclaimer trung thực về bảo mật
+  // 2. Miễn trừ nếu Agent có cảnh báo / disclaimer trung thực về bảo mật
   if (hasSecurityDisclaimer(answer)) {
     return undefined;
   }
 
-  // 4. Thu thập các đoạn mã cần kiểm tra
+  // 3. Thu thập các đoạn mã cần kiểm tra
   const codeSnippets: string[] = [];
 
   // 4a. Thu thập code blocks trong câu trả lời (answer)

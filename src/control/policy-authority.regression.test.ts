@@ -54,20 +54,45 @@ test('only explicit read-only/planning directives block implementation transitio
   assert.equal(executions, 0);
 });
 
-test('universal runner guards actual command effects in planning and exploration', async () => {
+test('classifier planning and exploration phases do not block editable command effects', async () => {
   let executions = 0;
   const registry = new ToolRegistry();
   registry.register({ name: 'run_command', description: 'fixture', parameters: { type: 'OBJECT', properties: { command: { type: 'STRING' } }, required: ['command'] } as any, execute: async () => { executions++; return { exitCode: 0 }; } });
   const runner = new ToolRunner(registry, new Workspace(process.cwd()), new PermissionManager('auto_approve'));
   for (const classificationPhase of ['plan', 'explore']) for (const controlMode of ['off', 'shadow', 'enforce'] as const) {
-    const context = { classificationPhase, controlMode, decisionId: 'fixture', allowedToolNames: ['run_command'], allowedToolSetHash: hashAllowedToolSet(['run_command']) };
-    const blocked = await runner.run('run_command', { command: 'node write.js' }, context);
-    assert.equal(blocked.result.errorCode, 'PHASE_TOOL_EFFECT_BLOCKED');
-    assert.equal(blocked.result.processStarted, false);
+    const context = { classificationPhase, controlMode, decisionId: 'fixture', allowedToolNames: ['run_command'], allowedToolSetHash: hashAllowedToolSet(['run_command']), userRequest: 'Fix this function' };
+    const mutated = await runner.run('run_command', { command: 'node write.js' }, context);
+    assert.equal(mutated.result.exitCode, 0, `${classificationPhase}:${controlMode}:${mutated.result.error}`);
     const safe = await runner.run('run_command', { command: 'git status -s' }, context);
     assert.equal(safe.result.exitCode, 0);
   }
-  assert.equal(executions, 6);
+  assert.equal(executions, 12);
+});
+
+test('explicit read-only and planning directives block mutations regardless of phase masking', async () => {
+  for (const mode of ['auto_approve', 'full_access'] as const) {
+    for (const userRequest of ['Read-only: inspect this function', '/plan fix this function']) {
+      let executions = 0;
+      const registry = new ToolRegistry();
+      registry.register({ name: 'replace_text', description: 'fixture', parameters: { type: 'OBJECT' } as any, execute: async () => { executions++; return {}; } });
+      const runner = new ToolRunner(registry, new Workspace(process.cwd()), new PermissionManager(mode));
+      const result = await runner.run('replace_text', {}, { classificationPhase: 'implement', userRequest });
+      assert.equal(result.result.errorCode, 'PHASE_TOOL_EFFECT_BLOCKED', `${mode}:${userRequest}`);
+      assert.equal(executions, 0, `${mode}:${userRequest}`);
+    }
+  }
+});
+
+test('plan lock still denies mutation under a permissive base mode', async () => {
+  let executions = 0;
+  const registry = new ToolRegistry();
+  registry.register({ name: 'replace_text', description: 'fixture', parameters: { type: 'OBJECT' } as any, execute: async () => { executions++; return {}; } });
+  const permissions = new PermissionManager('full_access');
+  permissions.setPlanLock(true);
+  const runner = new ToolRunner(registry, new Workspace(process.cwd()), permissions);
+  const result = await runner.run('replace_text', {}, { classificationPhase: 'implement', userRequest: 'Fix this function' });
+  assert.equal(result.result.errorCode, 'PERMISSION_DENIED');
+  assert.equal(executions, 0);
 });
 
 test('read-only effects deny execution alternatives while retaining inspection and metadata', async () => {

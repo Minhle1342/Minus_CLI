@@ -65,7 +65,6 @@ import { LivingPlaybookManager, PlaybookReflector, PlaybookCurator } from './con
 import { DomainIntentGuardian } from './agent/domain-intent-guardian.js';
 import {
   FinalAnswerGuard,
-  detectArchitectureAnalysisIntent,
   verifyWorkspaceGrounding,
   hasUnfulfilledDeferredPromise,
 } from './agent/final-answer-guard.js';
@@ -160,7 +159,7 @@ import { loadSession, saveSession, clearSession, getSessionFilePath } from './se
 import { SkillLoader } from './skills/skill-loader.js';
 import { SkillRegistry } from './skills/skill-registry.js';
 import { SuperpowersSource } from './skills/superpowers-source.js';
-import { SkillActivator, detectPlanningIntent, detectGameProgrammingIntent } from './skills/skill-activator.js';
+import { SkillActivator, detectPlanningIntent } from './skills/skill-activator.js';
 import {
   gameTilemapStudioTool,
   gamePixelSpriteStudioTool,
@@ -180,7 +179,6 @@ import { disposeLspManager, resolveLspSpawnInvocation } from './lsp/lsp-manager.
 import { ApprovalManager } from './agent/approval-manager.js';
 import { ReviewManager } from './agent/review-manager.js';
 import { createGitTools } from './tools/git-tools.js';
-import { detectExplicitGitMutationIntent } from './tools/git-intent.js';
 import { classifyGitCommand, detectExplicitGitCommandNames } from './tools/git-command-policy.js';
 import {
   CORE_SYSTEM_PROMPT,
@@ -3606,20 +3604,6 @@ export async function calculateTotal(items: any[]): Promise<number> {
     'Final-answer guard chặn false refusal cho Git subcommand tổng quát chưa được thử',
   );
 
-  // Kiểm thử Nhận diện ý định Phân tích Kiến trúc / Workflow / Pattern (detectArchitectureAnalysisIntent)
-  const archIntentVn = detectArchitectureAnalysisIntent('Phân tích cơ chế, workflow, pattern hay kiến trúc hệ thống của workspace này');
-  assert(archIntentVn.isArchitectureQuery === true, 'Nhận diện chính xác câu hỏi phân tích kiến trúc/workflow tiếng Việt');
-  assert(archIntentVn.categories.includes('architecture'), 'Phát hiện danh mục architecture');
-  assert(archIntentVn.categories.includes('workflow'), 'Phát hiện danh mục workflow');
-  assert(archIntentVn.categories.includes('pattern'), 'Phát hiện danh mục pattern');
-  assert(archIntentVn.categories.includes('mechanism'), 'Phát hiện danh mục mechanism');
-
-  const archIntentEn = detectArchitectureAnalysisIntent('Explain the system architecture, core workflows, and design patterns of the codebase');
-  assert(archIntentEn.isArchitectureQuery === true, 'Nhận diện chính xác câu hỏi phân tích kiến trúc tiếng Anh');
-
-  const codingTaskIntent = detectArchitectureAnalysisIntent('Sửa lỗi type error ở src/index.ts và chạy npm test');
-  assert(codingTaskIntent.isArchitectureQuery === false, 'Không nhận nhầm tác vụ coding/bugfix là câu hỏi phân tích kiến trúc');
-
   // Kiểm thử verifyWorkspaceGrounding
   const groundedAnalysis = verifyWorkspaceGrounding(
     'Dự án sử dụng file cấu hình package.json và module src/agent/final-answer-guard.ts để kiểm soát.',
@@ -4832,25 +4816,6 @@ Always write tests first!`;
     'SkillRegistry loadContent trả về playbook chuẩn của unity-ai-game-creator',
   );
 
-  // Phân loại intent lập trình game
-  const gameIntentVn = detectGameProgrammingIntent('Lập trình game 2D platformer pixel art');
-  assert(gameIntentVn.isGameProgramming === true && gameIntentVn.is2DOrPixel === true, 'detectGameProgrammingIntent nhận diện chính xác yêu cầu lập trình game 2D/Pixel tiếng Việt');
-
-  const gameIntentEn = detectGameProgrammingIntent('Please build a 2D pixel game with sprite sheet');
-  assert(gameIntentEn.isGameProgramming === true, 'detectGameProgrammingIntent nhận diện chính xác yêu cầu lập trình game tiếng Anh');
-
-  const gameSlashIntent = detectGameProgrammingIntent('/game-development');
-  assert(gameSlashIntent.isGameProgramming === true, 'detectGameProgrammingIntent nhận diện /game-development slash command');
-
-  const unitySlashIntent = detectGameProgrammingIntent('/unity-ai-game-creator');
-  assert(unitySlashIntent.isGameProgramming === true && unitySlashIntent.detectedEngine === 'unity', 'detectGameProgrammingIntent nhận diện /unity-ai-game-creator slash command');
-
-  const nonGameIntent = detectGameProgrammingIntent('Thiết kế REST API cho module xác thực tài khoản user');
-  assert(nonGameIntent.isGameProgramming === false, 'detectGameProgrammingIntent không nhầm lẫn tác vụ thông thường với game');
-
-  const gameTheoryBoundary = detectGameProgrammingIntent('Giải thích định lý Nash equilibrium trong game theory kinh tế học');
-  assert(gameTheoryBoundary.isGameProgramming === false, 'detectGameProgrammingIntent loại trừ game theory để tránh false positive');
-
   // Gating trong SkillActivator: Tác vụ thông thường KHÔNG nạp game-development và unity-ai-game-creator
   const normalActivation = activator.evaluate({
     session: spTestSession,
@@ -4989,9 +4954,9 @@ Always write tests first!`;
   assert(Boolean(unityRes.fullEditorScript?.includes('SerializedObject')), 'unity_gameplay_studio sinh code SerializedObject chuẩn');
   assert(Boolean(unityRes.fullEditorScript?.includes('EditorBuildSettingsScene')), 'unity_gameplay_studio cấu hình đúng Build Settings');
   assert(
-    detectExplicitGitMutationIntent('LLM có thể tự commit và push không?').push === false
-    && detectExplicitGitMutationIntent('commit và push code mới lên nhánh develop').push === true,
-    'Git intent phân biệt thảo luận capability với yêu cầu thực thi trực tiếp',
+    detectExplicitGitCommandNames('LLM có thể tự commit và push không?').length === 0
+    && detectExplicitGitCommandNames('hãy git commit và git push code mới lên nhánh develop').includes('push'),
+    'Git scope comes only from explicit git invocations, never from prose questions',
   );
   assert(
     detectExplicitGitCommandNames('hãy git rebase develop').includes('rebase')
@@ -7164,24 +7129,22 @@ Always write tests first!`;
   );
   assert(standardCtx.isUnity === false, 'detectPromptContext nhận diện chính xác non-Unity project');
   assert(standardCtx.hasComputerTool === false, 'detectPromptContext nhận diện không có computer tool');
-  assert(standardCtx.isArchitectureAnalysis === false, 'detectPromptContext nhận diện không phải truy vấn kiến trúc');
 
   const standardAssembled = customAssembler.assembleForContext(standardCtx);
   assert(!standardAssembled.includes('PROFESSIONAL UNITY GAME DEVELOPER PROTOCOL'), 'Standard turn không nạp module Unity (tiết kiệm ~1500 tokens)');
   assert(!standardAssembled.includes('COMPUTER USE AGENT PROTOCOL'), 'Standard turn không nạp module Computer Use (tiết kiệm ~600 tokens)');
-  assert(!standardAssembled.includes('DEEP ARCHITECTURE, WORKFLOW & BUSINESS MECHANISM'), 'Standard turn không nạp module Deep Architecture (tiết kiệm ~600 tokens)');
+  assert(standardAssembled.includes('DEEP ARCHITECTURE, WORKFLOW & BUSINESS MECHANISM'), 'Deep Architecture guidance luôn nạp (không còn đoán intent từ prose)');
 
   const standardTokens = ContextCompactor.estimateTokens(standardAssembled);
   console.log(`- Standard Turn Assembled Prompt: ${standardAssembled.length} chars (~${standardTokens} tokens)`);
   assert(standardTokens < 3000, `Standard turn giữ ngân sách < 3000 tokens, module nặng rò rỉ vô điều kiện sẽ lộ ở đây (thực tế: ~${standardTokens})`);
 
-  // Tình huống B: Yêu cầu phân tích kiến trúc -> Module Architecture Analysis được nạp động
+  // Tình huống B: Yêu cầu phân tích kiến trúc -> Module Architecture Analysis luôn có mặt
   const archCtx = detectPromptContext(
     workspace,
     new ToolRegistry(),
     'Phân tích kiến trúc hệ thống, workflow thực thi và design pattern của workspace',
   );
-  assert(archCtx.isArchitectureAnalysis === true, 'detectPromptContext nhận diện đúng Intent phân tích kiến trúc');
   const archAssembled = customAssembler.assembleForContext(archCtx);
   assert(archAssembled.includes('DEEP ARCHITECTURE, WORKFLOW & BUSINESS MECHANISM'), 'Assembled prompt nạp động module Architecture Analysis khi người dùng yêu cầu');
 

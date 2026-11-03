@@ -124,19 +124,6 @@ export class ToolDescriptorRegistry {
         deferLoading: false,
         schemaCost: this.cost(tool),
       };
-    } else if (name === 'run_node_script') {
-      // run_node_script là công cụ phẫu thuật & scratch đa năng: dùng cho explore, plan, implement và verify
-      descriptor = {
-        name,
-        capabilities: ['execute', 'edit', 'inspect', 'verify'],
-        phases: ['implement', 'verify', 'release'],
-        minimumRisk: 'R1',
-        mutates: true,
-        reversible: true,
-        requiresApproval: true,
-        deferLoading: false,
-        schemaCost: this.cost(tool),
-      };
     } else if (name === 'run_test_suite') {
       descriptor = {
         name,

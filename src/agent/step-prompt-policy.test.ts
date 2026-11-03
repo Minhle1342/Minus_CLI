@@ -66,7 +66,6 @@ type MatrixCase = {
   plan?: boolean;
   advice?: boolean;
   harness?: boolean;
-  scaffold?: boolean;
   fallback?: boolean;
 };
 
@@ -86,7 +85,6 @@ const matrix: MatrixCase[] = [
   {
     name: 'architecture',
     input: context({ activeStepQuery: 'Map architecture topology and call graph dependencies' }),
-    playbooks: ['architecture'],
   },
   {
     name: 'bugfix explore',
@@ -95,9 +93,7 @@ const matrix: MatrixCase[] = [
       classification: classification({ taskClass: 'bugfix', phase: 'explore', risk: 'R2', requiredCapabilities: ['inspect', 'search', 'edit'] }),
       harnessProfileName: 'strict-verification',
     }),
-    playbooks: ['rootCause'],
     harness: true,
-    scaffold: true,
   },
   {
     name: 'implement',
@@ -106,18 +102,17 @@ const matrix: MatrixCase[] = [
       classification: classification({ taskClass: 'feature', phase: 'implement', reversibility: 'reversible', requiredCapabilities: ['edit', 'verify'] }),
       harnessProfileName: 'velocity-first',
     }),
-    playbooks: ['mutation'],
     harness: true,
   },
   {
     name: 'verify',
     input: context({
       activeStepQuery: 'Run the decisive regression verification',
-      classification: classification({ taskClass: 'bugfix', phase: 'verify', requiredCapabilities: ['verify'] }),
+      classification: classification({ taskClass: 'bugfix', phase: 'verify', risk: 'R2', requiredCapabilities: ['verify'] }),
       harnessProfileName: 'strict-verification',
       hasValidatedHypothesis: true,
     }),
-    playbooks: ['rootCause', 'verifyDiff'],
+    playbooks: ['verifyDiff'],
     harness: true,
   },
   {
@@ -127,7 +122,6 @@ const matrix: MatrixCase[] = [
       lastToolName: 'manage_task',
       lastToolResult: { status: 'running', taskId: 'task-1' },
     }),
-    playbooks: ['longTask'],
   },
   {
     name: 'subagent',
@@ -136,7 +130,6 @@ const matrix: MatrixCase[] = [
       classification: classification({ requiredCapabilities: ['inspect', 'delegate'] }),
       activeAgentCount: 1,
     }),
-    playbooks: ['subagent'],
   },
   {
     name: 'active DAG',
@@ -149,7 +142,6 @@ const matrix: MatrixCase[] = [
       activeTask: { title: 'Implement parser', acceptanceCriteria: 'Tests pass' },
       harnessProfileName: 'velocity-first',
     }),
-    playbooks: ['mutation', 'dagPlan'],
     plan: true,
     harness: true,
   },
@@ -161,9 +153,7 @@ const matrix: MatrixCase[] = [
       failureSignature: 'test failed',
       lastToolResult: { error: 'assertion failed' },
     }),
-    playbooks: ['rootCause'],
     advice: true,
-    scaffold: true,
   },
   {
     name: 'low-confidence fallback',
@@ -175,7 +165,6 @@ const matrix: MatrixCase[] = [
     plan: true,
     advice: true,
     harness: true,
-    scaffold: true,
   },
   {
     name: 'post-submission',
@@ -201,7 +190,6 @@ test('StepPromptPolicy enforce matrix preserves every required block', () => {
       [item.plan, Boolean(decision.planContext)],
       [item.advice, Boolean(decision.advicePrompt)],
       [item.harness, Boolean(decision.harnessGuidance)],
-      [item.scaffold, Boolean(decision.scaffoldPrompt)],
     ] as const;
     for (const [expected, actual] of checks) {
       if (expected) {
@@ -214,6 +202,11 @@ test('StepPromptPolicy enforce matrix preserves every required block', () => {
 
     if (!item.fallback) {
       assert.equal(decision.includeStaticToolPlaybooks, false, item.name);
+      if (item.playbooks?.includes('verifyDiff')) {
+        assert.match(decision.toolPlaybookPrompt, /tests covering the changed code/, item.name);
+      } else {
+        assert.equal(decision.toolPlaybookPrompt, '', `${item.name}: fixed tool chains stay out of the prompt`);
+      }
     }
   }
 
@@ -247,7 +240,7 @@ test('off mode is a legacy prompt snapshot and shadow reports potential savings'
     plan: input.candidates.legacyPlanContext,
     advice: input.candidates.advicePrompt,
     harness: input.candidates.harnessGuidance,
-    scaffold: input.candidates.legacyScaffoldPrompt,
+    scaffold: '',
   });
   assert.equal(off.estimatedTokensSaved, 0);
   assert.ok(SECTION_TOOL_PLAYBOOKS.length > 0);
@@ -258,10 +251,11 @@ test('off mode is a legacy prompt snapshot and shadow reports potential savings'
   assert.ok(shadow.estimatedTokensSaved > 0);
 });
 
-test('attachment anchors force architecture playbook and scaffold guidance', () => {
+test('attachment anchors do not add a fixed playbook or Cognitive Scaffold', () => {
   const input = context({ activeStepQuery: 'Explain the current status', hasAttachments: true });
   const decision = policy.decide(input, 'enforce');
-  assert.ok(decision.selectedPlaybooks.includes('architecture'), 'attachments must force dependency/blast-radius playbook');
+  assert.deepEqual(decision.selectedPlaybooks, []);
+  assert.equal(decision.toolPlaybookPrompt, '');
   assert.ok(decision.reasonCodes.includes('ATTACHMENT_NEIGHBORHOOD'));
-  assert.ok(decision.scaffoldPrompt.length > 0, 'attachment scope must inject scaffold guidance');
+  assert.equal(decision.scaffoldPrompt, '');
 });

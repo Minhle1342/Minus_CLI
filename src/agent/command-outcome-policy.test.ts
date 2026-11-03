@@ -54,7 +54,7 @@ test('multi-step coding requests do not mandate create_plan', () => {
 
 test('git work via run_command counts like dedicated git tools in the capability guard', () => {
   const context = {
-    userRequest: 'commit và push code mới lên nhánh develop',
+    userRequest: 'git commit và git push code mới lên nhánh develop',
     availableToolNames: ['git_status', 'git_diff', 'git_add', 'git_commit', 'git_push'],
   };
   const denial = "I'm unable to commit and push because I don't have the necessary tools or permissions.";
@@ -71,7 +71,7 @@ test('git work via run_command counts like dedicated git tools in the capability
 
 test('git_command subcommand satisfies the matching dedicated git tool', () => {
   const context = {
-    userRequest: 'commit code mới',
+    userRequest: 'git commit code mới',
     availableToolNames: ['git_commit'],
   };
   const guard = new FinalAnswerGuard();
@@ -85,7 +85,7 @@ test('git_command subcommand satisfies the matching dedicated git tool', () => {
 
 test('git requests stay actionable through run_command after dedicated tools are unregistered', () => {
   const context = {
-    userRequest: 'commit và push code mới lên nhánh develop',
+    userRequest: 'git commit và git push code mới lên nhánh develop',
     availableToolNames: ['run_command'],
   };
   const denial = "I'm unable to commit and push because I don't have the necessary tools or permissions.";
@@ -98,7 +98,7 @@ test('git requests stay actionable through run_command after dedicated tools are
 
 test('blocked run_command does not count as attempted git work', () => {
   const context = {
-    userRequest: 'commit và push code mới lên nhánh develop',
+    userRequest: 'git commit và git push code mới lên nhánh develop',
     availableToolNames: ['git_commit', 'git_push'],
   };
   const guard = new FinalAnswerGuard();
@@ -109,6 +109,27 @@ test('blocked run_command does not count as attempted git work', () => {
   );
   assert.equal(
     guard.evaluate("I'm unable to commit and push because I don't have the necessary tools or permissions.", context).reason,
+    'unverified-capability-denial',
+  );
+});
+
+test('a what-if git question does not turn a factual conflict answer into a capability denial', () => {
+  const guard = new FinalAnswerGuard();
+  const context = {
+    userRequest: 'Kiểm tra xem nếu commit và push code hiện tại lên develop thì có bị conflict không?',
+    availableToolNames: ['run_command'],
+  };
+  const answer =
+    'Kết luận là không có conflict gì xảy ra khi commit và push code hiện tại lên nhánh develop.';
+  assert.equal(guard.evaluate(answer, context).allow, true);
+
+  // A genuine first-person denial on an explicit git command is still rejected.
+  const explicit = {
+    userRequest: 'hãy git commit và git push code mới lên nhánh develop',
+    availableToolNames: ['run_command'],
+  };
+  assert.equal(
+    guard.evaluate('Mình không có quyền push lên develop nên chưa commit.', explicit).reason,
     'unverified-capability-denial',
   );
 });

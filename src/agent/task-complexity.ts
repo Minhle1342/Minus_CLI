@@ -34,7 +34,7 @@ export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string)
       enforceScratchTest: false,
       criticStrictness: 'standard',
       compactionRatioBias: -0.05,
-      guidance: '🔍 [HARNESS PROFILE: EXPLORATION ACTIVE]: Prioritize structural survey — call read/search tools and extract context. Avoid direct source-code intervention before a plan exists.',
+      guidance: '🔍 [HARNESS PROFILE: EXPLORATION ACTIVE]: Prioritize structural survey and context gathering via read/search tools.',
     };
   }
 
@@ -44,7 +44,7 @@ export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string)
       enforceScratchTest: false,
       criticStrictness: 'lenient',
       compactionRatioBias: +0.05,
-      guidance: '⚡ [HARNESS PROFILE: VELOCITY-FIRST ACTIVE]: Scaffolding/new-feature task. Prioritize source-code creation speed and relax test-blocker checks in the early steps.',
+      guidance: '⚡ [HARNESS PROFILE: VELOCITY-FIRST ACTIVE]: Scaffolding/new-feature task. Build and iterate cleanly toward the goal.',
     };
   }
 
@@ -53,7 +53,7 @@ export function resolveRuntimeHarnessProfile(taskClass?: string, phase?: string)
     enforceScratchTest: false,
     criticStrictness: 'standard',
     compactionRatioBias: 0,
-    guidance: '⚖️ [HARNESS PROFILE: BALANCED-DEFAULT ACTIVE]: Balanced operation following the standard TDD workflow.',
+    guidance: '⚖️ [HARNESS PROFILE: BALANCED-DEFAULT ACTIVE]: Balanced implementation and verification.',
   };
 }
 

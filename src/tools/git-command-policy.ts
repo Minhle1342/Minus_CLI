@@ -1,4 +1,3 @@
-import { detectExplicitGitMutationIntent, normalizeIntentText } from './git-intent.js';
 import { parseShellAst } from '../security/shell-ast-parser.js';
 
 export type GitCommandRisk = 'read' | 'write' | 'network' | 'destructive';
@@ -28,6 +27,7 @@ const ALWAYS_DESTRUCTIVE_COMMANDS = new Set(['clean', 'filter-branch', 'prune', 
 
 const COMMAND_SYNONYMS: Record<string, RegExp> = {
   add: /\b(?:git add|stage|dua vao staging|them vao staging)\b/,
+  commit: /\b(?:git commit|commit|tao commit|lam commit|amend|fixup)\b/,
   branch: /\b(?:branch|tao nhanh|xoa nhanh|liet ke nhanh)\b/,
   checkout: /\b(?:checkout|chuyen sang nhanh|khoi phuc file)\b/,
   switch: /\b(?:switch|chuyen sang nhanh|doi nhanh)\b/,
@@ -123,6 +123,18 @@ export function parseGitInvocation(segment: string): ParsedGitInvocation | undef
   };
 }
 
+export function normalizeIntentText(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/đ/g, 'd')
+    .replace(/Đ/g, 'd')
+    .toLowerCase()
+    .replace(/[’']/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 export function detectExplicitGitCommandNames(userRequest?: string): string[] {
   const normalized = normalizeIntentText(userRequest || '');
   if (!normalized) return [];
@@ -134,10 +146,6 @@ export function detectExplicitGitCommandNames(userRequest?: string): string[] {
 
   const names = new Set<string>();
   for (const match of normalized.matchAll(/\bgit\s+([a-z0-9][a-z0-9._-]*)\b/g)) names.add(match[1]);
-  const mutation = detectExplicitGitMutationIntent(userRequest);
-  if (mutation.stage && !mutation.commit) names.add('add');
-  if (mutation.commit) names.add('commit');
-  if (mutation.push) names.add('push');
   if (directPrefix || names.size > 0) {
     for (const [command, pattern] of Object.entries(COMMAND_SYNONYMS)) {
       if (pattern.test(normalized)) names.add(command);

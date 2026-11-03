@@ -23,8 +23,32 @@ import {
 } from './prompt-sections.js';
 import {
   SECTION_ANTIGRAVITY_TOOLCHAIN_FULL,
+  SECTION_CODEBASE_INTELLIGENCE_FULL,
   SECTION_TERMINAL_SANDBOX_FULL,
+  createStandardSystemPrompt,
+  resolveSubagentPromptSections,
 } from './prompts.js';
+
+test('assembled prompts avoid duplicate batching and architecture boilerplate', () => {
+  const prompt = createStandardSystemPrompt({ request: 'Map the architecture and call graph' });
+  assert.equal(prompt.split('Batch independent').length - 1, 1, 'core states the batching rule once');
+  assert.ok(!prompt.includes('ARCHITECTURE, WORKFLOW & COMPONENT OVERVIEW'), 'core already covers architecture grounding and answer shape');
+});
+
+test('subagent terminal prompt states the proactive server launch rule once', () => {
+  const prompt = resolveSubagentPromptSections({ toolNames: ['run_command'] })
+    .map((section) => section.content)
+    .join('\n');
+  assert.equal(prompt.split(PROACTIVE_SERVER_LAUNCH_RULE).length - 1, 1);
+});
+
+test('prompts teach the grounding vocabulary and name only registered tools', () => {
+  // The grounding guard runs on every answer, so its escape markers belong in always-on core.
+  assert.ok(CORE_SYSTEM_PROMPT.includes('proposal'), 'core must teach the proposal marker');
+  assert.ok(CORE_SYSTEM_PROMPT.includes('does not exist'), 'core must teach the does-not-exist marker');
+  assert.ok(!SECTION_TERMINAL_SANDBOX_FULL.includes('safe sandbox'), 'execution may be host-side');
+  assert.ok(!SECTION_CODEBASE_INTELLIGENCE_FULL.includes('apply_patch'), 'no apply_patch tool is registered');
+});
 
 test('antigravity sections name the canonical web tools', () => {
   for (const section of [SECTION_ANTIGRAVITY_TOOLS, SECTION_ANTIGRAVITY_TOOLCHAIN_FULL]) {

@@ -232,7 +232,6 @@ async function runStepBenchmark(version: VersionModules): Promise<{
 }
 
 const allPromptBlocks = [
-  'architecture', 'rootCause', 'mutation', 'longTask', 'subagent', 'dagPlan',
   'plan', 'advice', 'harness', 'scaffold',
 ];
 
@@ -288,14 +287,14 @@ function promptPolicyContext(overrides: Record<string, any> = {}): Record<string
 const promptCases = [
   { input: promptPolicyContext(), required: [] },
   { input: promptPolicyContext({ activeStepQuery: 'Summarize README docs', harnessProfileName: 'read-only-guard' }), required: [] },
-  { input: promptPolicyContext({ activeStepQuery: 'Map architecture topology and call graph dependencies' }), required: ['architecture'] },
+  { input: promptPolicyContext({ activeStepQuery: 'Map architecture topology and call graph dependencies' }), required: [] },
   {
     input: promptPolicyContext({
       activeStepQuery: 'Debug root cause of authentication failure',
       classification: promptClassification({ taskClass: 'bugfix', phase: 'explore', requiredCapabilities: ['inspect', 'edit'] }),
       harnessProfileName: 'strict-verification',
     }),
-    required: ['rootCause', 'harness', 'scaffold'],
+    required: ['harness', 'scaffold'],
   },
   {
     input: promptPolicyContext({
@@ -303,7 +302,7 @@ const promptCases = [
       classification: promptClassification({ taskClass: 'feature', phase: 'implement', requiredCapabilities: ['edit', 'verify'] }),
       harnessProfileName: 'velocity-first',
     }),
-    required: ['mutation', 'harness'],
+    required: ['harness'],
   },
   {
     input: promptPolicyContext({
@@ -312,15 +311,15 @@ const promptCases = [
       harnessProfileName: 'strict-verification',
       hasValidatedHypothesis: true,
     }),
-    required: ['rootCause', 'harness'],
+    required: ['verifyDiff', 'harness'],
   },
   {
     input: promptPolicyContext({ activeStepQuery: 'Poll running background server task', lastToolName: 'manage_task', lastToolResult: { status: 'running' } }),
-    required: ['longTask'],
+    required: [],
   },
   {
     input: promptPolicyContext({ activeStepQuery: 'Delegate parallel review to a subagent', classification: promptClassification({ requiredCapabilities: ['inspect', 'delegate'] }) }),
-    required: ['subagent'],
+    required: [],
   },
   {
     input: promptPolicyContext({
@@ -331,11 +330,11 @@ const promptCases = [
       activeTask: { title: 'Implement parser', acceptanceCriteria: 'Tests pass' },
       harnessProfileName: 'velocity-first',
     }),
-    required: ['mutation', 'dagPlan', 'plan', 'harness'],
+    required: ['plan', 'harness'],
   },
   {
     input: promptPolicyContext({ activeStepQuery: 'Try a different parser strategy', consecutiveFailures: 2, failureSignature: 'assertion failed', lastToolResult: { error: 'failed' } }),
-    required: ['rootCause', 'advice', 'scaffold'],
+    required: ['advice', 'scaffold'],
   },
   {
     input: promptPolicyContext({ activeStepQuery: 'Ambiguous request', classification: promptClassification({ confidence: 0.6 }) }),
@@ -374,7 +373,7 @@ async function runPromptGatingBenchmark(version: VersionModules): Promise<{
       const selected = decision
         ? [
           ...(decision.includeStaticToolPlaybooks
-            ? allPromptBlocks.slice(0, 6)
+            ? []
             : decision.selectedPlaybooks),
           ...(decision.planContext ? ['plan'] : []),
           ...(decision.advicePrompt ? ['advice'] : []),

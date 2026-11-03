@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { FinalAnswerGuard, verifyWorkspaceGrounding, detectAnalysisOrInvestigationIntent, hasUnfulfilledDeferredPromise, isSystemPromptEcho, stripSystemPromptEcho } from './final-answer-guard.js';
+import { FinalAnswerGuard, verifyWorkspaceGrounding, hasUnfulfilledDeferredPromise, isSystemPromptEcho, stripSystemPromptEcho } from './final-answer-guard.js';
 import { AcceptancePolicy } from '../control-plane/critic/acceptance-policy.js';
 import { CompletionEvidenceGate, isUserExplicitlyExemptingTests, isVerificationCommand } from './completion-evidence.js';
 import { collectCompletionObservations, getTurnCompletionState, hasObservedMutation } from './completion-observations.js';
@@ -32,7 +32,6 @@ test('read-only answers follow requested detail without word, heading, or langua
     ['Giải thích ngắn gọn bằng tiếng Việt hàm này.', 'Hàm trả về true khi chuỗi rỗng.'],
     ['Investigate the root cause.', 'The inspected branch permits an empty token. The caller has not been inspected, so the root cause remains uncertain.'],
   ]) assert.equal(guard.evaluate(answer, { userRequest }).allow, true);
-  assert.equal(detectAnalysisOrInvestigationIntent('Giải thích ngắn gọn bằng tiếng Việt hàm này.').isAnalysisQuery, false);
 });
 
 test('both guards agree on quotations, examples, proposals, and real deferred work', () => {

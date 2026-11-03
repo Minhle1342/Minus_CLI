@@ -54,7 +54,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
   },
   PHASE_TRANSITION_ACCEPTED: {
     primarySuccessors: ['create_file', 'write_file', 'replace_text'],
-    secondarySuccessors: ['read_file', 'run_command', 'run_node_script'],
+    secondarySuccessors: ['read_file', 'run_command'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
   },

@@ -3,7 +3,6 @@ import test from 'node:test';
 import { Workspace } from '../workspace/workspace.js';
 import { parseGitInvocation } from './git-command-policy.js';
 import { detectExplicitGitCommandNames, validateGitCommandScope } from './git-command-policy.js';
-import { detectExplicitGitMutationIntent } from './git-intent.js';
 import { checkGitPolicyForShell, createRunCommandTool } from './run-command.js';
 
 test('parseGitInvocation keeps global flags in argv for scope checks', () => {
@@ -154,9 +153,22 @@ test('parseGitInvocation ignores git keywords in non-git commands via AST', () =
 });
 
 test('vietnamese intent synonyms still drive git guidance', () => {
-  assert.ok(detectExplicitGitMutationIntent('hãy sửa commit vừa rồi').commit);
+  assert.ok(detectExplicitGitCommandNames('hãy git commit --amend').includes('commit'));
   assert.ok(detectExplicitGitCommandNames('tiếp tục rebase').includes('rebase'));
-  assert.ok(detectExplicitGitMutationIntent('hãy đẩy code lên main').push);
+  assert.ok(detectExplicitGitCommandNames('hãy đẩy code lên main').includes('push'));
+  // `commit` is an explicit verb like every other entry in the synonym table. Without
+  // it, "commit và push" authorizes the push while the commit itself stays unauthorized.
+  assert.ok(detectExplicitGitCommandNames('hãy commit và push code mới lên nhánh develop').includes('commit'));
+  assert.ok(detectExplicitGitCommandNames('commit và push giúp tôi').includes('commit'));
+});
+
+test('a what-if question about commit/push grants no git scope', () => {
+  assert.deepEqual(
+    detectExplicitGitCommandNames(
+      'Kiểm tra xem nếu commit và push code hiện tại lên develop thì có bị conflict không?',
+    ),
+    [],
+  );
 });
 
 test('no-channel permission denial merges into a single COMMAND_NOT_ALLOWED', async () => {

@@ -138,13 +138,13 @@ test('phase-specific exploration anchors stay visible after dynamic retrieval', 
     reversibility: 'reversible',
   } as any, tools).phaseExploreToolAnchors;
 
-  // By default (no .codegraph/ index and not an architecture query), CodeGraph anchors are filtered out to save tokens
+  // By default (no .codegraph/ index), CodeGraph anchors are filtered out to save tokens
   assert.deepEqual(decideDefault('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'get_symbol_context_360', 'get_diagnostics', 'run_command']);
   assert.deepEqual(decideDefault('plan'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology']);
   assert.deepEqual(decideDefault('implement'), ['read_file', 'get_symbol_context_360', 'get_diagnostics']);
   assert.deepEqual(decideDefault('verify'), ['read_file', 'get_diagnostics', 'run_command']);
 
-  // When hasCodeGraph = true or isArchitectureQuery = true, CodeGraph tools are activated
+  // When a .codegraph/ index exists, CodeGraph tools are activated
   const decideWithCodeGraph = (phase: string) => gate.decide({
     id: `class-anchor-cg-${phase}`,
     taskClass: 'bugfix',
@@ -157,18 +157,6 @@ test('phase-specific exploration anchors stay visible after dynamic retrieval', 
 
   assert.deepEqual(decideWithCodeGraph('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics', 'run_command']);
   assert.deepEqual(decideWithCodeGraph('plan'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'codegraph_explore', 'codegraph_impact', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology']);
-
-  const decideWithArchQuery = (phase: string) => gate.decide({
-    id: `class-anchor-arch-${phase}`,
-    taskClass: 'bugfix',
-    phase,
-    complexity: 'small',
-    risk: 'R1',
-    requiredCapabilities: ['inspect', 'search'],
-    reversibility: 'reversible',
-  } as any, tools, { userRequest: 'Explain the architecture and call graph' }).phaseExploreToolAnchors;
-
-  assert.deepEqual(decideWithArchQuery('explore'), ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics', 'run_command']);
 
   const decision = gate.decide({
     id: 'class-anchor-surface',

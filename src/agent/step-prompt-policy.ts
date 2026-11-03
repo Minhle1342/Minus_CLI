@@ -4,7 +4,6 @@ import { resolveGitWorkflow, gitWorkflowGuidance, type GitWorkflowState } from '
 import { isMutationTool as isSharedMutationTool } from '../tools/diff-generator.js';
 import {
   SECTION_TOOL_PLAYBOOKS,
-  TOOL_PLAYBOOK_PROMPTS,
   type ToolPlaybookPromptId,
   resolveVerifyPlaybookPrompt,
   GIT_WORKFLOW_PROMPTS,
@@ -125,8 +124,8 @@ function stringifyResult(result: unknown): string {
 
 function isMutationTool(toolName?: string): boolean {
   if (!toolName) return false;
-  // Single source of truth lives in tools/diff-generator.ts (FILE_MUTATION_TOOLS,
-  // includes run_node_script). run_command is intentionally NOT a blanket mutation:
+  // Single source of truth lives in tools/diff-generator.ts (FILE_MUTATION_TOOLS).
+  // run_command is intentionally NOT a blanket mutation:
   // read-only shell (ls, git status/diff) must not trigger mutation advice.
   return isSharedMutationTool(toolName);
 }
@@ -156,7 +155,7 @@ function buildStrongAdvisoryPrompt(context: StepPromptPolicyContext): { text: st
   if (context.cascadeFrozen) {
     const detail = context.cascadeReason ? ` ${context.cascadeReason}.` : '';
     blocks.push(
-      `${STRONG_ADVISORY_HEADER}\n[CASCADE_REPAIR_ADVISORY]: Repeated fixes keep failing on the same error signature.${detail} Stop editing blindly — revise the root-cause hypothesis, re-plan via "update_plan_task", or run diagnostics/tests to get a genuinely new signal. Recommended: update_plan_task first, mutate after.`,
+      `${STRONG_ADVISORY_HEADER}\n[CASCADE_REPAIR_ADVISORY]: Repeated fixes keep failing on the same error signature.${detail} Re-evaluate the underlying hypothesis and diagnostics before further edits.`,
     );
     codes.push('CASCADE_REPAIR_ADVISORY');
   }
@@ -166,13 +165,13 @@ function buildStrongAdvisoryPrompt(context: StepPromptPolicyContext): { text: st
   if (evidenceTask && !context.hasValidatedHypothesis && context.paretoEvidenceSufficient !== true && score < threshold) {
     const reasons = context.evidenceReasons?.length ? ` Current evidence: ${context.evidenceReasons.join(', ')}.` : '';
     blocks.push(
-      `${STRONG_ADVISORY_HEADER}\n[UNVERIFIED_MUTATION_ADVISORY]: Evidence is still thin (${score}/${threshold}, risk ${context.classification.risk}) — read the exact target and run formulate_and_verify_hypothesis before broad edits.${reasons} Recommended: read_file the target before mutating.`,
+      `${STRONG_ADVISORY_HEADER}\n[UNVERIFIED_MUTATION_ADVISORY]: Current evidence (${score}/${threshold}, risk ${context.classification.risk}).${reasons} Inspect the target before broad edits.`,
     );
     codes.push('UNVERIFIED_MUTATION_ADVISORY');
   }
   if (context.reproductionEnforced && !context.hasPostFixPass && context.classification.taskClass === 'bugfix') {
     blocks.push(
-      `${STRONG_ADVISORY_HEADER}\n[REPRODUCTION_VERIFICATION_ADVISORY]: Bugfix has no post-fix PASS yet. Run the reproduction test and prove PASS before submit_solution; if the infra is broken, state the reason explicitly in the summary. Recommended: run_command (reproduction test).`,
+      `${STRONG_ADVISORY_HEADER}\n[REPRODUCTION_VERIFICATION_ADVISORY]: Bugfix currently lacks observed post-fix test pass. Verify the fix empirically before completing.`,
     );
     codes.push('REPRODUCTION_VERIFICATION_ADVISORY');
   }
@@ -213,59 +212,9 @@ export class StepPromptPolicy {
     const lastResult = stringifyResult(context.lastToolResult).toLowerCase();
     const lastToolFailed = Boolean(context.failureSignature)
       || /(error|failed|failure|exception|exitcode[^0-9]*[1-9])/.test(lastResult);
-    // Infra/transient failures (timeout, rate-limit, connection reset) route to
-    // retry/longTask handling, not root-cause debugging.
-    const infraTransientPattern = /(timeout|timed out|etimedout|econnreset|econnrefused|rate[ -]?limit|too many requests|\b429\b|503|service unavailable|socket hang up)/;
-    const hasLogicFailureSignal = (Boolean(context.failureSignature) && !infraTransientPattern.test(String(context.failureSignature).toLowerCase()))
-      || (lastToolFailed && !infraTransientPattern.test(lastResult));
 
-    if (!context.hasSubmittedSolution && !context.hasVerifiedTests) {
-      if (/\b(architecture|architectural|topology|dependency|dependencies|route|call[ -]?graph|blast radius|kiến trúc|phụ thuộc)\b/i.test(lower)) {
-        selectedPlaybooks.push('architecture');
-      }
-      if (
-        ['bugfix', 'security'].includes(context.classification.taskClass)
-        || hasLogicFailureSignal
-        || /\b(root cause|diagnos|debug|traceback|exception|nguyên nhân|lỗi)\b/i.test(lower)
-      ) {
-        selectedPlaybooks.push('rootCause');
-      }
-      if (context.classification.phase === 'implement' && capabilities.has('edit')) {
-        selectedPlaybooks.push('mutation');
-      }
-      if (
-        ['manage_task', 'schedule'].includes(context.lastToolName || '')
-        || /\b(background|running|taskid|server|watcher|schedule|async|long task|tác vụ dài)\b/i.test(`${lower} ${lastResult}`)
-      ) {
-        selectedPlaybooks.push('longTask');
-      }
-      if (
-        capabilities.has('delegate')
-        || context.activeAgentCount > 0
-        || /\b(subagent|multi-agent|delegate|parallel review|brainstorm|phân công)\b/i.test(lower)
-      ) {
-        selectedPlaybooks.push('subagent');
-      }
-      if (
-        context.classification.phase === 'plan'
-        || context.planRequired
-        || (context.hasPlan && context.planIncomplete)
-        || context.planBlocked
-      ) {
-        selectedPlaybooks.push('dagPlan');
-      }
-      if (context.classification.phase === 'verify') {
-        selectedPlaybooks.push('verifyDiff');
-      }
-    }
-
-    // Attachment neighborhood: @-attached files are anchors — force dependency/blast-radius
-    // guidance so the model expands to hop-1/hop-2 related files instead of staring at anchors.
-    // NOTE: pinned by step-prompt-policy.test.ts:261 — attachments always force the
-    // architecture playbook (even trivial question/R0). Do not gate this without
-    // updating that contract test first.
-    if (context.hasAttachments && !context.hasSubmittedSolution) {
-      if (!selectedPlaybooks.includes('architecture')) selectedPlaybooks.push('architecture');
+    if (!context.hasSubmittedSolution && !context.hasVerifiedTests && context.classification.phase === 'verify') {
+      selectedPlaybooks.push('verifyDiff');
     }
 
     if (selectedPlaybooks.length > 0) reasonCodes.push(`PLAYBOOKS_${selectedPlaybooks.join('_').toUpperCase()}`);
@@ -318,20 +267,7 @@ export class StepPromptPolicy {
     );
     if (includeHarnessGuidance) reasonCodes.push(`HARNESS_${context.harnessProfileName.toUpperCase()}`);
 
-    const antiDeception = /\b(skip tests?|ignore tests?|bypass|hardcode|quick fix|trust me|asap|sycophancy|không cần (?:đọc|chạy|test)|gấp để release)\b/i.test(lower);
-    const parserTask = /\b(parser|extract|normalize|validator|phone|email|trích xuất|chuẩn hóa)\b/i.test(lower);
-    const riskyMutation = (['bugfix', 'security', 'refactor'].includes(context.classification.taskClass)
-      // feature tasks only need the scaffold when risk is actually high (R3+);
-      // low-risk R0 feature implements stay scaffold-free (pinned by matrix test).
-      || (context.classification.taskClass === 'feature' && highRisk))
-      && (capabilities.has('edit') || ['explore', 'implement'].includes(context.classification.phase));
-    const includeScaffold = antiDeception
-      || context.consecutiveFailures >= 2
-      || confidence < 0.8
-      || context.hasAttachments === true
-      || (riskyMutation && (!evidenceSufficient || highRisk))
-      || (parserTask && context.paretoUncertainty === 'high');
-    if (includeScaffold) reasonCodes.push('COGNITIVE_SCAFFOLD_REQUIRED');
+    // Cognitive Scaffold removed per policy guidance to allow model autonomy
 
     const includePlanContext = context.planRequired || (context.hasPlan && context.planIncomplete);
     if (includePlanContext) reasonCodes.push(context.planBlocked ? 'PLAN_BLOCKED_CONTEXT' : 'ACTIVE_PLAN_CONTEXT');
@@ -355,9 +291,9 @@ export class StepPromptPolicy {
       if (includeOrchestrator) reasonCodes.push('DYNAMIC_ORCHESTRATOR_GUIDANCE');
     }
 
-    const targetPlaybookPrompt = selectedPlaybooks
-      .map((id) => (id === 'verifyDiff' ? resolveVerifyPlaybookPrompt(context.classification.risk) : TOOL_PLAYBOOK_PROMPTS[id]))
-      .join('\n\n');
+    const targetPlaybookPrompt = selectedPlaybooks.length > 0
+      ? resolveVerifyPlaybookPrompt(context.classification.risk)
+      : '';
     const targetGitPlaybookPrompt = [
       gitWorkflow ? gitWorkflowGuidance(gitWorkflow) : '',
       selectedGitPlaybook ? GIT_WORKFLOW_PROMPTS[selectedGitPlaybook] : '',
@@ -367,7 +303,6 @@ export class StepPromptPolicy {
       context.candidates.legacyPlanContext,
       context.candidates.advicePrompt,
       context.candidates.harnessGuidance,
-      context.candidates.legacyScaffoldPrompt,
     ]);
     const targetAfterTokens = estimateTokens([
       targetPlaybookPrompt,
@@ -375,7 +310,6 @@ export class StepPromptPolicy {
       includePlanContext ? context.candidates.stepPlanContext : '',
       includeAdvice ? context.candidates.advicePrompt : '',
       includeHarnessGuidance ? context.candidates.harnessGuidance : '',
-      includeScaffold ? context.candidates.scaffoldPrompt : '',
       strongAdvisory.text,
       dynamicFrontendGuidance,
       dynamicCodebaseIntelligenceGuidance,
@@ -413,9 +347,7 @@ export class StepPromptPolicy {
       harnessGuidance: useLegacyInjection
         ? context.candidates.harnessGuidance
         : includeHarnessGuidance ? context.candidates.harnessGuidance : '',
-      scaffoldPrompt: useLegacyInjection
-        ? (context.candidates.legacyScaffoldPrompt || '')
-        : includeScaffold ? context.candidates.scaffoldPrompt : '',
+      scaffoldPrompt: '',
       strongAdvisoryPrompt: strongAdvisory.text,
       estimatedTokensBefore: beforeTokens,
       estimatedTokensAfter: reportedAfterTokens,

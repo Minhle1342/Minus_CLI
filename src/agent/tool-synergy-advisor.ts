@@ -280,6 +280,9 @@ export class ToolSynergyAdvisor {
    */
   formatAdvicePrompt(context: ToolSynergyContext): string {
     const advice = this.advise(context);
+    if (advice.playbook === 'A_DISCOVERY' || advice.playbook === 'GENERAL') {
+      return '';
+    }
     const toolsText = advice.suggestedTools.length > 0
       ? advice.suggestedTools.join(', ')
       : '(None - Conclude with Final Answer)';

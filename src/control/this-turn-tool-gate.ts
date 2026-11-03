@@ -4,7 +4,6 @@ import type { ClassificationDecision } from './classification-types.js';
 import { ToolDescriptorRegistry, READ_TOOL_NAMES, EDIT_TOOL_NAMES } from './tool-descriptor-registry.js';
 import { isOrchestrationTool, ORCHESTRATION_SPAWN_TOOL_NAMES } from './phase-tool-effects.js';
 import { hasCodeGraphIndexSync } from '../search/codegraph-client.js';
-import { detectArchitectureAnalysisIntent } from '../agent/final-answer-guard.js';
 import { hasNetworkIntent } from './network-intent.js';
 import type { GateReader } from '../security/full-access-gates.js';
 
@@ -60,7 +59,6 @@ export interface ThisTurnToolGateOptions {
   workspaceDir?: string;
   userRequest?: string;
   hasCodeGraph?: boolean;
-  isArchitectureQuery?: boolean;
   gates?: GateReader;
 }
 
@@ -138,8 +136,7 @@ export class ThisTurnToolGate {
       .map((tool) => tool.name)
       .sort();
     const hasCodeGraph = options?.hasCodeGraph ?? (options?.workspaceDir ? hasCodeGraphIndexSync(options.workspaceDir) : false);
-    const isArchitectureQuery = options?.isArchitectureQuery ?? (options?.userRequest ? detectArchitectureAnalysisIntent(options.userRequest).isArchitectureQuery : false);
-    const allowCodeGraphAnchors = hasCodeGraph || isArchitectureQuery;
+    const allowCodeGraphAnchors = hasCodeGraph;
 
     const baseAnchors = PHASE_EXPLORE_TOOL_ANCHORS[classification.phase] || [];
     const filteredAnchors = allowCodeGraphAnchors

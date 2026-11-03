@@ -291,11 +291,11 @@ test('Pillar E2: Exploration Exhaustion Gate is advisory by default and enforcea
     getEvents: () => [],
   } as any;
 
-  // Architecture query with 0 inspected files
+  // Code-referencing answer with 0 inspected files
   const archDecision = critic.evaluateExplorationExhaustion({
     userRequest: 'Giải thích kiến trúc và luồng xử lý của hệ thống',
     session: emptySession,
-    finalAnswer: 'Hệ thống dùng mô hình microservices.',
+    finalAnswer: 'src/agent/agent-loop.ts dùng mô hình microservices.',
   });
   assert.equal(archDecision.allowed, true);
   assert.equal(archDecision.scorePenalty, 40);
@@ -304,9 +304,18 @@ test('Pillar E2: Exploration Exhaustion Gate is advisory by default and enforcea
   const enforced = critic.evaluateExplorationExhaustion({
     userRequest: 'Giải thích kiến trúc và luồng xử lý của hệ thống',
     session: emptySession,
+    finalAnswer: 'src/agent/agent-loop.ts dùng mô hình microservices.',
     gateMode: 'enforce',
   });
   assert.equal(enforced.allowed, false);
+
+  // A prose answer with no code reference makes no repository claim, so no evidence is forced.
+  const proseOnly = critic.evaluateExplorationExhaustion({
+    userRequest: 'Giải thích kiến trúc và luồng xử lý của hệ thống',
+    session: emptySession,
+    finalAnswer: 'Hệ thống dùng mô hình microservices.',
+  });
+  assert.equal(proseOnly.scorePenalty, 0);
 
   // Single-file satisficing on defect investigation
   const singleFileSession = {

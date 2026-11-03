@@ -18,7 +18,14 @@ import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText } from 
 import { ThisTurnToolGate } from '../control/this-turn-tool-gate.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { evaluateCommandPreflight } from '../tools/command-preflight-guard.js';
-import { checkGitPolicyForShell, createRunCommandTool, findWorkspaceEscapeViolations, isBlockedGitPushToMain } from '../tools/run-command.js';
+import {
+  checkGitPolicyForShell,
+  createRunCommandTool,
+  findWorkspaceEscapeViolations,
+  isBlockedGitPushToMain,
+  isCurrentBranchPushToMain,
+  readCheckedOutBranch,
+} from '../tools/run-command.js';
 import { ToolRunner } from '../tools/tool-runner.js';
 
 const CLOSED = gatesForMode('ask_sensitive');
@@ -154,6 +161,24 @@ test('kept gate push_to_main: git push origin main is refused with every gate op
   assert.equal(isBlockedGitPushToMain('git push origin feature/main-fix'), false);
   assert.equal(isBlockedGitPushToMain('git push origin main-v2'), false);
   assert.equal(isBlockedGitPushToMain('git status'), false);
+  // Shell shapes the guard must not lose: quotes are stripped before git sees the
+  // word, operators chain another command onto the same push, and a substitution
+  // resolves to main at runtime.
+  assert.equal(isBlockedGitPushToMain('git push origin "main"'), true);
+  assert.equal(isBlockedGitPushToMain("git push origin 'master'"), true);
+  assert.equal(isBlockedGitPushToMain('git push origin $(echo main)'), true);
+  assert.equal(isBlockedGitPushToMain('git push origin main;echo done'), true);
+  assert.equal(isBlockedGitPushToMain('git push origin main&&git push origin main'), true);
+  assert.equal(isBlockedGitPushToMain('git -C . push origin main'), true);
+  assert.equal(isBlockedGitPushToMain('git push origin +main'), true);
+  assert.equal(isBlockedGitPushToMain('cd repo && git push origin main'), true);
+  // A backslash-newline is joined by the shell before git runs, so the guard has
+  // to read the joined form; without it this was a working bypass.
+  assert.equal(isBlockedGitPushToMain('git \\\n  push origin main'), true);
+  assert.equal(isBlockedGitPushToMain('git \\\r\n  push origin master'), true);
+  assert.equal(isBlockedGitPushToMain('git \\\n  push origin feature/safe'), false);
+  // Pushing local main onto a different remote branch is not a push to main.
+  assert.equal(isBlockedGitPushToMain('git push origin main:release-notes'), false);
   const permissions = new PermissionManager('full_access');
   const subagent = await permissions.checkPermission(
     'run_command',
@@ -162,6 +187,60 @@ test('kept gate push_to_main: git push origin main is refused with every gate op
   );
   assert.equal(subagent.allowed, false);
   assert.equal(subagent.errorCode, 'PUSH_TO_MAIN_PROHIBITED');
+
+  // Main-agent path: full access auto-grants approval, and approval does not
+  // lift this gate — the push must never reach the process spawner.
+  const spawned: string[] = [];
+  const localManager = {
+    getStatus: () => ({ ...NO_UNISOLATED_STATUS }),
+    exec: async (command: string) => {
+      spawned.push(command);
+      return { stdout: '', stderr: '', exitCode: 0, durationMs: 1, success: true };
+    },
+  } as any;
+  for (const command of ['git push origin main', 'git push origin "main"', 'git push origin main;echo done', 'git \\\n  push origin main']) {
+    const result = await createRunCommandTool(localManager, undefined, permissions)
+      .execute({ command }, new Workspace(tempWorkspace()));
+    assert.equal(result.errorCode, 'PUSH_TO_MAIN_PROHIBITED', command);
+    assert.equal(result.processStarted, false, command);
+  }
+  assert.deepEqual(spawned, [], 'a push to main must not spawn a process under full access');
+});
+
+test('kept gate push_to_main: a refspec-less push publishes the checked-out branch', async () => {
+  // `git push` names no destination in text, so the destination is a repository fact.
+  assert.equal(isCurrentBranchPushToMain('git push', 'main'), true);
+  assert.equal(isCurrentBranchPushToMain('git push origin', 'master'), true);
+  assert.equal(isCurrentBranchPushToMain('git push --force-with-lease', 'refs/heads/main'), true);
+  assert.equal(isCurrentBranchPushToMain('git push', 'develop'), false);
+  assert.equal(isCurrentBranchPushToMain('git push', undefined), false);
+  // An explicit destination is the other predicate's job, and a push onto a
+  // different branch stays allowed.
+  assert.equal(isCurrentBranchPushToMain('git push origin main', 'main'), false);
+  assert.equal(isCurrentBranchPushToMain('git push origin main:release-notes', 'main'), false);
+
+  const root = tempWorkspace();
+  fs.mkdirSync(path.join(root, '.git'), { recursive: true });
+  fs.writeFileSync(path.join(root, '.git', 'HEAD'), 'ref: refs/heads/main\n');
+  assert.equal(readCheckedOutBranch(root), 'main');
+  assert.equal(readCheckedOutBranch(tempWorkspace()), undefined);
+
+  const permissions = new PermissionManager('full_access');
+  const spawned: string[] = [];
+  const localManager = {
+    getStatus: () => ({ ...NO_UNISOLATED_STATUS }),
+    exec: async (command: string) => {
+      spawned.push(command);
+      return { stdout: '', stderr: '', exitCode: 0, durationMs: 1, success: true };
+    },
+  } as any;
+  for (const command of ['git push', 'git push origin']) {
+    const result = await createRunCommandTool(localManager, undefined, permissions)
+      .execute({ command }, new Workspace(root));
+    assert.equal(result.errorCode, 'PUSH_TO_MAIN_PROHIBITED', command);
+    assert.equal(result.processStarted, false, command);
+  }
+  assert.deepEqual(spawned, [], 'a bare push from a main checkout must not spawn a process');
 });
 
 test('kept gate output_redaction: secrets in command output are masked regardless of mode', () => {
@@ -242,7 +321,7 @@ test('gate 3 shell scan: home paths and traversal stop counting as escapes under
   assert.ok(findWorkspaceEscapeViolations(command, workspace).length > 0);
 });
 
-test('gate 5 at the dispatch site: the phase effect check stops blocking tool calls under full access', async () => {
+test('gate 5 at the dispatch site: inferred explore permits edits but explicit read-only still blocks', async () => {
   let executions = 0;
   const registry = new ToolRegistry();
   registry.register({
@@ -252,17 +331,22 @@ test('gate 5 at the dispatch site: the phase effect check stops blocking tool ca
     execute: async () => { executions++; return { exitCode: 0 }; },
   });
   const workspace = new Workspace(tempWorkspace());
-  const context = { classificationPhase: 'explore' } as any;
+  const context = { classificationPhase: 'explore', userRequest: 'Fix this function' } as any;
 
-  const blocked = await new ToolRunner(registry, workspace, new PermissionManager('auto_approve'))
+  const editable = await new ToolRunner(registry, workspace, new PermissionManager('auto_approve'))
     .run('run_command', { command: 'node write.js' }, context);
-  assert.equal(blocked.result.errorCode, 'PHASE_TOOL_EFFECT_BLOCKED');
-  assert.equal(executions, 0);
-
-  const allowed = await new ToolRunner(registry, workspace, new PermissionManager('full_access'))
-    .run('run_command', { command: 'node write.js' }, context);
-  assert.equal(allowed.result.errorCode, undefined);
+  assert.equal(editable.result.errorCode, undefined);
   assert.equal(executions, 1);
+
+  const fullAccess = await new ToolRunner(registry, workspace, new PermissionManager('full_access'))
+    .run('run_command', { command: 'node write.js' }, context);
+  assert.equal(fullAccess.result.errorCode, undefined);
+  assert.equal(executions, 2);
+
+  const readOnly = await new ToolRunner(registry, workspace, new PermissionManager('full_access'))
+    .run('run_command', { command: 'node write.js' }, { classificationPhase: 'implement', userRequest: 'Read-only: inspect this function' });
+  assert.equal(readOnly.result.errorCode, 'PHASE_TOOL_EFFECT_BLOCKED');
+  assert.equal(executions, 2);
 });
 
 test('gate 4 end-to-end: full access routes an auto run to the host instead of the isolated container', async () => {
