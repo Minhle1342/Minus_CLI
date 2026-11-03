@@ -42,6 +42,7 @@ import {
   type PhaseGuidanceOptions,
   SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
   SECTION_PRE_SUBMIT_EVIDENCE_AUDIT,
+  SECTION_PRAGMATIC_MINIMALISM,
   type MonorepoKind,
   clearPromptContextCache,
   needsFrontendGuidance,
@@ -87,6 +88,7 @@ export {
   type PhaseGuidanceOptions,
   SECTION_INSTRUCTION_HIERARCHY_SUFFIX_ANCHOR,
   SECTION_PRE_SUBMIT_EVIDENCE_AUDIT,
+  SECTION_PRAGMATIC_MINIMALISM,
 };
 
 /**

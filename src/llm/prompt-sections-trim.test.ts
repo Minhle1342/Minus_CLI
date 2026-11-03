@@ -138,3 +138,12 @@ test('project fingerprint is cached per workspace root', () => {
   assert.equal(second.primaryLanguage, first.primaryLanguage);
   clearPromptContextCache();
 });
+
+test('pragmatic-minimalism is registered at Priority 1000 in T3 tail without static conditions', () => {
+  const section = DEFAULT_PROMPT_SECTIONS.find((s) => s.id === 'pragmatic-minimalism');
+  assert.ok(section, 'pragmatic-minimalism must be registered in DEFAULT_PROMPT_SECTIONS');
+  assert.equal(section.tier, 'T3');
+  assert.equal(section.priority, 1000);
+  assert.ok(!section.condition, 'pragmatic-minimalism must be always-on in dynamic tail');
+  assert.ok(section.content.includes('PRAGMATIC MINIMALISM & ROOT-CAUSE LADDER'));
+});
