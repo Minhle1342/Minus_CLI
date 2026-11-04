@@ -118,12 +118,13 @@ test('Prompt Engineering Mũi nhọn 3: ToolSynergyAdvisor Call-Graph Aware Guid
   assert.equal(debuggingAdvice.playbook, 'B_DEBUGGING');
   assert.match(debuggingAdvice.guidance, /\[Graph Trace\]: Defect locus "processPayment" invoked by \[checkoutController\] calls \[stripeGateway, auditLogger\]/);
 
-  // Test 3c: apply_patch lỗi với Python target file -> sử dụng dynamic few-shot patch spec
+  // Test 3c: mutation failure routes to root-cause debugging with canonical tools
   const patchErrorAdvice = advisor.advise({
-    lastToolName: 'apply_patch',
-    lastToolResult: { error: 'Hunk #1 failed at offset 20' },
+    lastToolName: 'replace_text',
+    lastToolResult: { error: 'oldText not found' },
     lastTargetFile: 'server/app.py',
   });
-  assert.equal(patchErrorAdvice.playbook, 'C_MUTATION');
-  assert.match(patchErrorAdvice.guidance, /def compute\(a: int, b: int\) -> int:/);
+  assert.equal(patchErrorAdvice.playbook, 'B_DEBUGGING');
+  assert.doesNotMatch(patchErrorAdvice.guidance, /apply_patch/);
+  assert.ok(patchErrorAdvice.suggestedTools.every((tool) => !tool.startsWith('browser_')));
 });

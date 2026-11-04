@@ -43,21 +43,6 @@ export const SCOUT_TOOL_NAMES: readonly string[] = [
   'list_files',
   'search_text',
   'search_codebase_fast',
-  'read_compressed_code',
-  'read_shared_context',
-  'read_memory',
-  'get_diagnostics',
-  'inspect_symbol',
-  'inspect_image',
-  'find_references',
-  'lsp_query',
-  'analyze_impact',
-  'query_call_graph',
-  'get_route_map',
-  'get_symbol_context_360',
-  'get_task_output',
-  'list_worktrees',
-  'list_skills',
   'search_web',
   'read_url_content',
 ];
@@ -91,8 +76,7 @@ export type SubagentFactory = (
 ) => AgentLoop;
 
 const MUTATING_TOOL_NAMES = new Set([
-  'write_file', 'replace_text', 'replace_file_content', 'apply_patch',
-  'delete_file', 'move_file', 'edit_file', 'write_patch',
+  'write_file', 'replace_text', 'replace_file_content', 'delete_file',
 ]);
 const TOOL_PATH_ARG_KEYS = ['path', 'filePath', 'targetFile', 'TargetFile', 'target_path', 'file_path'];
 const HANDOVER_ARG_CLIP = 200;

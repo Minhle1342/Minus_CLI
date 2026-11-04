@@ -732,18 +732,25 @@ async function main() {
   activeWorkspaceRef = workspace;
 
   // Bộ điều khiển hủy tác vụ chủ động trong lúc đang chạy (Antigravity CLI Style Cancellation)
-  let activeExecutionController: AbortController | null = null;
+  // ponytail: Map controller theo sessionId để các session tab chạy song song có controller riêng
+  const activeExecutionControllers = new Map<string, AbortController>();
+  const getActiveController = (): AbortController | undefined => {
+    return (activeSession && activeExecutionControllers.get(activeSession.id)) || activeExecutionControllers.values().next().value;
+  };
   let lastCancellationTimestamp = 0;
   let isPromptingPermission = false;
   let isShuttingDown = false;
   const askCancellable = (terminal: TeaTerminal, promptText: string, signal?: AbortSignal): Promise<string | undefined> => terminal.ask(promptText, signal);
 
-  const runWithCancellation = async <T>(fn: (signal: AbortSignal) => Promise<T>): Promise<T | undefined> => {
+  const runWithCancellation = async <T>(fn: (signal: AbortSignal) => Promise<T>, targetSessionId?: string): Promise<T | undefined> => {
     const controller = new AbortController();
-    activeExecutionController = controller;
+    const sid = targetSessionId || activeSession?.id;
+    if (sid) {
+      activeExecutionControllers.set(sid, controller);
+    }
     // Chốt session sở hữu task lúc bắt đầu: user switch tab giữa chừng cũng
     // không làm dot busy rơi nhầm sang tab khác lúc task kết thúc.
-    const runSessionId = activeSession?.id;
+    const runSessionId = sid || activeSession?.id;
     tui?.setBusy(true, runSessionId);
     try {
       return await fn(controller.signal);
@@ -755,10 +762,10 @@ async function main() {
       }
       throw err;
     } finally {
-      if (activeExecutionController === controller) {
-        activeExecutionController = null;
-        tui?.setBusy(false, runSessionId);
+      if (sid && activeExecutionControllers.get(sid) === controller) {
+        activeExecutionControllers.delete(sid);
       }
+      tui?.setBusy(false, runSessionId);
     }
   };
 
@@ -843,7 +850,7 @@ Please focus on executing and verifying this task. Report it complete only after
   let isPlanModeActive = false;
   const applyPlanMode = (plan: boolean): void => {
     if (plan === isPlanModeActive) return;
-    if (plan && activeExecutionController) {
+    if (plan && activeExecutionControllers.size > 0) {
       console.log(`\n${c.yellow}⚠ Plan mode deferred: a task is running. Permissions unchanged until it finishes.${c.reset}\n`);
       return;
     }
@@ -975,8 +982,8 @@ Please focus on executing and verifying this task. Report it complete only after
       });
       return getSlashCommandSuggestions(value.slice(0, cursor), 6).map(item => ({ label: item.command + ' ' + item.description, value: item.command + value.slice(cursor), cursor: item.command.length }));
     },
-    onAbort: () => { activeExecutionController?.abort(); kernel.cancelCurrentTask(); },
-    onQuit: () => { isShuttingDown = true; activeExecutionController?.abort(); kernel.cancelCurrentTask(); },
+    onAbort: () => { getActiveController()?.abort(); kernel.cancelCurrentTask(); },
+    onQuit: () => { isShuttingDown = true; for (const c of activeExecutionControllers.values()) c.abort(); kernel.cancelCurrentTask(); },
     onMode: mode => { applyPlanMode(mode === 'PLAN'); },
     onHotModelSwitch: async (newModelName) => {
       await performHotModelSwitch(newModelName);
@@ -993,10 +1000,11 @@ Please focus on executing and verifying this task. Report it complete only after
   syncFullAccessBadge();
   const rl = tui;
   tui.on('line', (line: string) => {
-    if (!activeExecutionController || isPromptingPermission) return;
+    const currentRunning = activeSession ? activeExecutionControllers.get(activeSession.id) : undefined;
+    if (!currentRunning || isPromptingPermission) return;
     const trimmed = line.trim(); if (!trimmed) return;
     if (['/cancel', '/stop', '/abort'].includes(trimmed)) {
-      activeExecutionController.abort(); agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.'); return;
+      currentRunning.abort(); agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.'); return;
     }
     if (trimmed === '/model' || trimmed === '/modal' || trimmed.startsWith('/model ') || trimmed.startsWith('/modal ')) {
       const target = trimmed.replace(/^\/(?:model|modal)\s*/, '').trim();
@@ -1020,7 +1028,7 @@ Please focus on executing and verifying this task. Report it complete only after
     isPromptingPermission = true;
     tui?.setDiff(request.diff || '', false);
     try {
-      const answer = await rl.ask('Permission request', activeExecutionController?.signal, {
+      const answer = await rl.ask('Permission request', getActiveController()?.signal, {
         toolName: request.toolName,
         target: request.target || String(request.details?.command || request.details?.path || request.details?.filePath || '(unknown)'),
         summary: request.summary,
@@ -1172,6 +1180,15 @@ Please focus on executing and verifying this task. Report it complete only after
         try { tui.setSessionTranscript(activeSession.id, sessionHistoryToTranscript(activeSession.getHistory())); } catch { /* không chặn vòng lặp */ }
       }
       const userPrompt = await tui.readPrompt();
+      // Đảm bảo activeSession đồng bộ với tab đang highlight trên TUI trước khi xử lý prompt
+      if (tui?.model.sessions.activeId && tui.model.sessions.activeId !== activeSession.id) {
+        const loaded = await kernel.ctx.sessions.load(tui.model.sessions.activeId);
+        if (loaded) {
+          activeSession = loaded;
+          agentLoop.bindSession(activeSession);
+          saveSession({ activeSessionId: activeSession.id });
+        }
+      }
       const trimmed = userPrompt.trim();
 
       if (!trimmed) {
@@ -3261,35 +3278,38 @@ Please focus on executing and verifying this task, and report it complete only a
       // Các prompt tiếp tục cùng một session và được flush xuống JSONL.
       sessionCount++;
 
-      try {
-        await runWithCancellation(async (signal) => {
-          const isPlanMode = tui?.model.mode === 'PLAN' || isPlanModeActive;
-          const hasIncompletePlan = agentLoop.planManager.hasPlan() && !agentLoop.planManager.isAllTasksCompleted();
-          const basePrompt = attachmentResult.expandedPrompt;
-          const request = isPlanMode
-            ? buildPlanningPrompt(trimmed) + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${basePrompt}` : '')
-            : (hasIncompletePlan
-              ? buildImplementationPrompt(basePrompt, agentLoop.planManager)
-              : basePrompt);
-          await agentLoop.submit(activeSession, request, 'human', { signal });
+      // ponytail: Không await chặn vòng lặp chính. Dispatch task theo session sở hữu để giải phóng readPrompt() cho tab khác.
+      const taskSession = activeSession;
+      const isPlanMode = tui?.model.mode === 'PLAN' || isPlanModeActive;
+      const hasIncompletePlan = agentLoop.planManager.hasPlan() && !agentLoop.planManager.isAllTasksCompleted();
+      const basePrompt = attachmentResult.expandedPrompt;
+      const request = isPlanMode
+        ? buildPlanningPrompt(trimmed) + (attachmentResult.hasAttachments ? `\n\n[Attached Context]:\n${basePrompt}` : '')
+        : (hasIncompletePlan
+          ? buildImplementationPrompt(basePrompt, agentLoop.planManager)
+          : basePrompt);
+
+      void runWithCancellation(async (signal) => {
+        try {
+          await agentLoop.submit(taskSession, request, 'human', { signal });
           checkAndAutoCompleteGoal();
-        });
-      } catch (err: any) {
-        console.error(`\n${c.red}${c.bold}❌ Agent Loop execution error:${c.reset}`, err.message);
-        if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {
-          console.log(`\n${c.yellow}💡 Tip: This model does not exist or the account/API key lacks access.`);
-          console.log(`👉 You can switch right away to models that work with your available keys:`);
-          console.log(`   - ${c.brightCyan}/model 1${c.yellow} : Google Gemini Flash (Key available)`);
-          console.log(`   - ${c.brightCyan}/model 4${c.yellow} : Groq Llama 3.3 70B (Key available)`);
-          console.log(`   - ${c.brightCyan}/model 25${c.yellow}: Pollinations GPT-4o-mini (No key needed)${c.reset}\n`);
-        } else if (err.message && err.message.includes('402')) {
-          console.log(`\n${c.yellow}💡 Tip: The current account is out of credit ($0.00).`);
-          console.log(`👉 Just type ${c.brightCyan}/model 1${c.yellow} to switch to ${c.bold}Google Gemini Flash (100% free)${c.yellow} or ${c.brightCyan}/model 4${c.yellow} (Groq Free)!${c.reset}\n`);
-        } else if (err.message && err.message.includes('401')) {
-          console.log(`\n${c.yellow}💡 Tip: This provider's API key is invalid or expired.`);
-          console.log(`👉 Please check your .env file or type ${c.brightCyan}/model 1${c.yellow} to use Gemini.${c.reset}\n`);
+        } catch (err: any) {
+          console.error(`\n${c.red}${c.bold}❌ Agent Loop execution error [${taskSession.id}]:${c.reset}`, err.message);
+          if (err.message && (err.message.includes('404') || err.message.includes('model_not_found'))) {
+            console.log(`\n${c.yellow}💡 Tip: This model does not exist or the account/API key lacks access.`);
+            console.log(`👉 You can switch right away to models that work with your available keys:`);
+            console.log(`   - ${c.brightCyan}/model 1${c.yellow} : Google Gemini Flash (Key available)`);
+            console.log(`   - ${c.brightCyan}/model 4${c.yellow} : Groq Llama 3.3 70B (Key available)`);
+            console.log(`   - ${c.brightCyan}/model 25${c.yellow}: Pollinations GPT-4o-mini (No key needed)${c.reset}\n`);
+          } else if (err.message && err.message.includes('402')) {
+            console.log(`\n${c.yellow}💡 Tip: The current account is out of credit ($0.00).`);
+            console.log(`👉 Just type ${c.brightCyan}/model 1${c.yellow} to switch to ${c.bold}Google Gemini Flash (100% free)${c.yellow} or ${c.brightCyan}/model 4${c.yellow} (Groq Free)!${c.reset}\n`);
+          } else if (err.message && err.message.includes('401')) {
+            console.log(`\n${c.yellow}💡 Tip: This provider's API key is invalid or expired.`);
+            console.log(`👉 Please check your .env file or type ${c.brightCyan}/model 1${c.yellow} to use Gemini.${c.reset}\n`);
+          }
         }
-      }
+      }, taskSession.id);
 
       // Tự động rút và thực thi các câu lệnh còn lại trong hàng đợi Queued Messages (Post-turn Drain)
       while (activeSession && agentLoop.inbox.pending(activeSession.id) > 0 && !isShuttingDown) {

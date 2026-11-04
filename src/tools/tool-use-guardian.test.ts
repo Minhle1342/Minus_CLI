@@ -6,12 +6,14 @@ import {
   DEFAULT_TOOL_ALTERNATIVES,
 } from './tool-use-guardian.js';
 
-test('tool-use-guardian: alternatives includes run_node_script (commit 18c67b2)', () => {
-  assert.ok(DEFAULT_TOOL_ALTERNATIVES.run_node_script);
-  assert.deepEqual(DEFAULT_TOOL_ALTERNATIVES.run_node_script, [
-    'replace_text',
-    'run_command',
-  ]);
+test('tool-use-guardian: alternatives cover canonical tools only', () => {
+  assert.deepEqual(DEFAULT_TOOL_ALTERNATIVES.search_text, ['run_command', 'read_file']);
+  for (const name of Object.keys(DEFAULT_TOOL_ALTERNATIVES)) {
+    assert.ok(
+      !['run_node_script', 'formulate_and_verify_hypothesis', 'apply_patch', 'view_file', 'get_diagnostics'].includes(name),
+      `${name} is not a registered tool`,
+    );
+  }
 });
 
 test('tool-use-guardian: classifies failure into canonical categories', () => {
@@ -54,17 +56,17 @@ test('tool-use-guardian: pre-call validation coerces WaitMsBeforeAsync on run_co
 
 test('tool-use-guardian: tracks failure count and flags unreliable tools after 3 consecutive failures', () => {
   const guardian = new ToolUseGuardian();
-  assert.equal(guardian.isToolUnreliable('run_node_script'), false);
+  assert.equal(guardian.isToolUnreliable('search_text'), false);
 
-  guardian.recordExecution('run_node_script', { error: 'Timeout', status: 'error' }, 500);
-  guardian.recordExecution('run_node_script', { error: 'Timeout', status: 'error' }, 500);
-  assert.equal(guardian.isToolUnreliable('run_node_script'), false);
+  guardian.recordExecution('search_text', { error: 'Timeout', status: 'error' }, 500);
+  guardian.recordExecution('search_text', { error: 'Timeout', status: 'error' }, 500);
+  assert.equal(guardian.isToolUnreliable('search_text'), false);
 
-  guardian.recordExecution('run_node_script', { error: 'Timeout', status: 'error' }, 500);
-  assert.equal(guardian.isToolUnreliable('run_node_script'), true);
+  guardian.recordExecution('search_text', { error: 'Timeout', status: 'error' }, 500);
+  assert.equal(guardian.isToolUnreliable('search_text'), true);
 
-  const stats = guardian.getStats('run_node_script');
-  assert.deepEqual(stats.suggestedAlternatives, ['replace_text', 'run_command']);
+  const stats = guardian.getStats('search_text');
+  assert.deepEqual(stats.suggestedAlternatives, ['run_command', 'read_file']);
 });
 
 test('tool-use-guardian: pre-call validation coerces old_text and new_text aliases on replace_text', () => {

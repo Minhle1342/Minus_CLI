@@ -104,7 +104,7 @@ export class Harness2RecursiveEngine {
       const planInvGates = [
         ...baseScaffold.negativeGate,
         '🔒 [PHASE LOCK: PLAN] NEVER attempt code mutations (DO NOT call replace_text or write_file) during the PLAN phase.',
-        'NEVER call submit_solution or update_plan_task before completing the architectural survey and recording the plan.',
+        'NEVER declare the plan complete before finishing the architectural survey and recording it in markdown.',
         'ALWAYS inspect caller references and quantify blast radius before committing to an architectural decomposition.',
       ];
       const planInvToolGuidance: Record<string, string> = {
@@ -149,10 +149,10 @@ export class Harness2RecursiveEngine {
       const planDomToolGuidance: Record<string, string> = {
         ...baseCatalog,
         ...(isTypeScript ? {
-          codegraph_explore: 'Survey TypeScript interfaces, export hierarchies, and caller types across the repo before planning changes.',
+          search_text: 'Survey TypeScript interfaces, export hierarchies, and caller types across the repo before planning changes.',
         } : {}),
         ...(isRefactor ? {
-          analyze_impact: 'Quantify blast radius on existing callers before proposing architectural refactor milestones.',
+          read_file: 'Quantify blast radius on existing callers by reading caller call-sites before proposing architectural refactor milestones.',
         } : {}),
       };
       candidates.push({
@@ -182,10 +182,8 @@ export class Harness2RecursiveEngine {
     ];
     const implInvToolGuidance: Record<string, string> = {
       ...baseCatalog,
-      replace_text: 'STRICT INVARIANT: MUST inspect lines via read_file immediately prior to mutation. MUST pass expectedFileHash. MUST immediately verify via get_diagnostics post-mutation.',
-      run_command: 'STRICT INVARIANT: MUST NOT use sleep polling; use schedule. Run build and test verification commands immediately after each surgical edit.',
-      get_diagnostics: 'STRICT INVARIANT: Inspect compiler feedback immediately after editing a file. Never tolerate lingering compilation errors.',
-      submit_solution: 'STRICT INVARIANT: MUST verify exit code 0 on testCommand before submission. Fake mocks or synthetic assertions are strictly rejected.',
+      replace_text: 'STRICT INVARIANT: MUST inspect lines via read_file immediately prior to mutation. MUST pass expectedFileHash. MUST immediately verify via run_command post-mutation.',
+      run_command: 'STRICT INVARIANT: MUST NOT use sleep polling; launch long-running commands in background with WaitMsBeforeAsync=5000. Run build, test, and compiler checks immediately after each surgical edit.',
     };
     candidates.push({
       id: 'inv1',
@@ -200,7 +198,6 @@ export class Harness2RecursiveEngine {
       toolGuidance: implInvToolGuidance,
       toolGuidanceDelta: {
         run_command: 'Run build and test verification commands immediately after each surgical edit',
-        get_diagnostics: 'Inspect compiler feedback immediately after editing a file',
       },
     });
 
@@ -219,7 +216,7 @@ export class Harness2RecursiveEngine {
     const implDomToolGuidance: Record<string, string> = {
       ...baseCatalog,
       ...(isTypeScript ? {
-        get_diagnostics: 'Query TypeScript Language Server diagnostics (tsc --noEmit). Resolve all type errors and signature mismatches before reporting completion.',
+        run_command: 'Query TypeScript diagnostics (npx tsc --noEmit). Resolve all type errors and signature mismatches before reporting completion.',
       } : {}),
       ...(isBug ? {
         run_command: 'First execute the reproduction test to confirm defect failure, then re-execute after surgical mutation to confirm pass.',

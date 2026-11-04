@@ -13,11 +13,11 @@ class OrchestrationFollowingLLM {
   private index = 0;
   readonly modelName = 'orchestration-script';
   private readonly replies = [
-    { toolCalls: [{ id: 'search-1', name: 'search_codebase_fast', args: { query: 'Service.run' } }] },
-    { toolCalls: [{ id: 'context-1', name: 'get_symbol_context_360', args: { symbol: 'Service.run', path: 'src/service.ts' } }] },
-    { toolCalls: [{ id: 'read-1', name: 'read_file', args: { path: 'src/service.ts', symbol: 'Service.run' } }] },
-    { toolCalls: [{ id: 'impact-1', name: 'analyze_impact', args: { target: 'Service.run', direction: 'upstream' } }] },
-    { text: 'Service.run validates the input before returning it; its caller and targeted test were identified from graph context.', toolCalls: [] },
+    { toolCalls: [{ id: 'search-1', name: 'search_text', args: { query: 'Service.run' } }] },
+    { toolCalls: [{ id: 'read-1', name: 'read_file', args: { path: 'src/service.ts' } }] },
+    { toolCalls: [{ id: 'edit-1', name: 'replace_text', args: { path: 'src/service.ts', searchContent: 'return value;', replaceWith: 'return value.trim();' } }] },
+    { toolCalls: [{ id: 'test-1', name: 'run_command', args: { command: 'npm test -- --filter=service' } }] },
+    { text: 'Service.run validates the input before returning it; the change was verified with the targeted test.', toolCalls: [] },
   ];
 
   getTokenConfig(): Record<string, number> {
@@ -46,26 +46,15 @@ test('AgentLoop enforce mode exposes the broad-to-narrow retrieval path and reco
       parameters: { type: 'OBJECT', properties: {} } as any,
       execute: async (args: any) => execute(args),
     });
-    register('search_codebase_fast', () => ({ hits: [{ path: 'src/service.ts', symbol: 'Service.run' }] }));
-    register('read_compressed_code', () => ({ segments: [{ path: 'src/service.ts', symbol: 'Service.run', fidelity: 'full' }] }));
-    register('get_symbol_context_360', () => ({
-      success: true,
-      context360: {
-        symbol: 'Service.run',
-        file: 'src/service.ts',
-        callers: [{ name: 'main', file: 'src/index.ts', line: 2 }],
-        callees: [],
-        relatedTests: [{ file: 'src/service.test.ts', line: 3, preview: 'run' }],
-      },
-    }));
+    register('search_text', () => ({ hits: [{ path: 'src/service.ts', symbol: 'Service.run' }] }));
     register('read_file', () => ({
       path: 'src/service.ts',
       symbol: 'Service.run',
       completeDeclaration: true,
       content: 'export class Service { run(value: string) { return value; } }',
     }));
-    register('analyze_impact', () => ({ risk: 'LOW', directCallers: 1, affectedProcesses: [] }));
-    register('query_call_graph', () => ({ callers: [], callees: [] }));
+    register('replace_text', () => ({ success: true }));
+    register('run_command', () => ({ exitCode: 0, stdout: 'All 1 test passed!' }));
 
     const llm = new OrchestrationFollowingLLM();
     const loop = new AgentLoop(llm, registry, {
@@ -87,10 +76,10 @@ test('AgentLoop enforce mode exposes the broad-to-narrow retrieval path and reco
       .filter((event) => event.type === 'tool/call')
       .map((event) => String(event.data.toolName));
     assert.deepEqual(toolSequence, [
-      'search_codebase_fast',
-      'get_symbol_context_360',
+      'search_text',
       'read_file',
-      'analyze_impact',
+      'replace_text',
+      'run_command',
     ]);
     assert.match(answer, /Service\.run/);
     // The model-visible surface is the canonical core set on every step; the
@@ -105,10 +94,9 @@ test('AgentLoop enforce mode exposes the broad-to-narrow retrieval path and reco
       .map((event) => event.data.controlDecision)
       .filter((decision): decision is any => Boolean(decision?.kind === 'reliable-tool-orchestration'));
     assert.ok(decisions.length >= 4);
-    assert.deepEqual(decisions.slice(0, 4).map((decision) => decision.route.stage), [
+    assert.deepEqual(decisions.slice(0, 3).map((decision) => decision.route.stage), [
       'broad_discovery',
       'symbol_context',
-      'exact_implementation',
       'ready_for_mutation',
     ]);
     const telemetry = loop.reliableToolOrchestrationTelemetry.snapshot();

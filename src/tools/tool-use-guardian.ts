@@ -159,7 +159,7 @@ export function buildGateStrongAdvisory(gate?: PreMutationGateContext): string[]
       const reasons = gate.evidenceReasons?.length ? ` Current evidence: ${gate.evidenceReasons.join(', ')}.` : '';
       items.push(formatStrongAdvisory(
         'UNVERIFIED_MUTATION_ADVISORY',
-        `Evidence is still thin (${score}/${threshold}, risk ${risk}) — read the exact target and run formulate_and_verify_hypothesis before broad edits.${reasons}`,
+        `Evidence is still thin (${score}/${threshold}, risk ${risk}) — read the exact target and run a reproduction/test via run_command before broad edits.${reasons}`,
         'read_file the target before mutating',
       ));
     }
@@ -169,26 +169,14 @@ export function buildGateStrongAdvisory(gate?: PreMutationGateContext): string[]
 
 export const DEFAULT_TOOL_ALTERNATIVES: Record<string, string[]> = {
   search_codebase_fast: ['search_text', 'run_command', 'read_file'],
-  grep_search: ['search_text', 'run_command'],
   search_text: ['run_command', 'read_file'],
   read_file: ['list_files', 'search_text', 'run_command'],
-  read_compressed_code: ['read_file'],
-  pack_codebase: ['list_files', 'read_file'],
   replace_text: ['write_file'],
-  query_call_graph: ['read_file', 'search_text'],
-  get_symbol_context_360: ['read_file', 'search_text'],
-  get_route_map: ['search_text', 'read_file'],
-  git_status: ['run_command'],
-  git_diff: ['run_command'],
-  git_command: ['run_command'],
-  report_investigation_findings: ['read_file', 'search_text'],
-  formulate_and_verify_hypothesis: ['run_command', 'read_file'],
   replace_file_content: ['replace_text', 'write_file'],
   write_to_file: ['write_file', 'replace_text'],
   web_search: ['run_command'],
   search_web: ['web_search', 'run_command'],
   read_url_content: ['web_fetch', 'run_command'],
-  run_node_script: ['replace_text', 'run_command'],
 };
 
 /**
@@ -553,8 +541,6 @@ export class ToolUseGuardian {
       'replace_text',
       'create_file',
       'delete_file',
-      'move_file',
-      'run_node_script',
     ].includes(toolName);
 
     // 2c(i). Lazy-omission sensor: block LLM placeholders that would silently
@@ -699,7 +685,7 @@ export class ToolUseGuardian {
           errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
           reason: errorMsg,
           suggestedAlternative: targetInspected ? 'replace_text' : 'read_file',
-          suggestedTool: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+          suggestedTool: targetInspected ? 'run_command' : 'read_file',
           suggestedArgs: targetInspected ? undefined : { path: filePath },
           guardianDiagnosis: {
             category: 'PRE_MUTATION_GATE_BLOCKED',
@@ -708,7 +694,7 @@ export class ToolUseGuardian {
             maxRetries: 0,
             backoffMs: 0,
             recoveryAction: targetInspected
-              ? 'Formulate and verify hypothesis first'
+              ? 'Run a reproduction or test command via run_command to collect empirical evidence first'
               : `Call read_file("${filePath}") first to inspect target lines, verify indentation, and obtain current contentHash.`,
             suggestedAlternative: targetInspected ? 'replace_text' : 'read_file',
           },
@@ -719,7 +705,7 @@ export class ToolUseGuardian {
       strongAdvisories.push(formatStrongAdvisory(
         'UNVERIFIED_MUTATION_ADVISORY',
         `Adaptive Pareto: uncertainty is still high relative to the cost of error for "${toolName}" (evidence ${evidenceScore}/${evidenceThreshold}, risk ${risk}). Need to ${missing}.${reasons}`,
-        targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+        targetInspected ? 'run a reproduction/test command via run_command' : 'read the target with read_file',
       ));
       advisoryCodes.push('UNVERIFIED_MUTATION_ADVISORY');
     }

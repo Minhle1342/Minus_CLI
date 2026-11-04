@@ -523,7 +523,7 @@ export function calculateComprehensiveBlastRadius(params: {
     warnings.push(`This file has ${directConsumers.length} direct consumer module(s). The change may cause compiler errors.`);
   }
 
-  recommendedActions.push('Check compiler/diagnostics with "get_diagnostics" or "tsc --noEmit".');
+  recommendedActions.push('Check compiler/diagnostics by running "npx tsc --noEmit" via run_command.');
   if (impactedTestSuites.length > 0) {
     const testTargets = impactedTestSuites.slice(0, 3).join(' ');
     recommendedActions.push(`Run the impacted tests: npm test -- ${testTargets}`);

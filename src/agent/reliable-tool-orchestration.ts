@@ -56,12 +56,9 @@ export interface ToolOrchestrationTelemetrySnapshot {
 }
 
 export const RELIABLE_CONTEXT_TOOL_NAMES = new Set([
-  'search_codebase_fast',
-  'read_compressed_code',
-  'get_symbol_context_360',
+  'search_text',
+  'list_files',
   'read_file',
-  'analyze_impact',
-  'query_call_graph',
 ]);
 
 export function resolveReliableToolOrchestrationMode(value = process.env.MINUS_RELIABLE_TOOL_ORCHESTRATION): ReliableToolOrchestrationMode {
@@ -82,13 +79,13 @@ export function applyReliableToolRouteToDeclarations<T extends { name: string }>
 
   // Repoformer Abstention Gate: when evidence is sufficient or in mutation phase, strip broad discovery tools
   if (decision.abstainRetrieval) {
-    allowedContextTools.delete('search_codebase_fast');
-    allowedContextTools.delete('read_compressed_code');
+    allowedContextTools.delete('search_text');
+    allowedContextTools.delete('list_files');
   }
 
   // LATS Cycle break: prune cycling tool from allowed set
-  if (decision.cycleDetected && decision.selectedTool !== 'search_codebase_fast') {
-    allowedContextTools.delete('search_codebase_fast');
+  if (decision.cycleDetected && decision.selectedTool !== 'search_text') {
+    allowedContextTools.delete('search_text');
   }
 
   const scoped = declarations.filter((tool) => !RELIABLE_CONTEXT_TOOL_NAMES.has(tool.name) || allowedContextTools.has(tool.name));
@@ -107,11 +104,11 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
   if (input.evidenceSufficient) {
     return selectVisible(input, {
       stage: 'ready_for_mutation',
-      preferredTool: 'analyze_impact',
-      fallbackTools: ['read_file', 'replace_text', 'run_command', 'get_diagnostics'],
+      preferredTool: 'replace_text',
+      fallbackTools: ['read_file', 'run_command'],
       confidence: 'high',
       reasonCodes: ['EVIDENCE_SUFFICIENT_ABSTAIN_RETRIEVAL', 'ENTER_MUTATION_PHASE'],
-      guidance: '[Repoformer Abstention] Sufficient codebase evidence acquired. Broad discovery is locked to avoid attention dilution. Proceed directly to impact check, mutation, and verification.',
+      guidance: '[Repoformer Abstention] Sufficient codebase evidence acquired. Broad discovery is locked to avoid attention dilution. Proceed to a bounded mutation and verify with run_command.',
       constrainSafe: true,
       abstainRetrieval: true,
     });
@@ -124,10 +121,10 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
       return selectVisible(input, {
         stage: 'cycle_break',
         preferredTool: cycle.suggestedRecoveryTool,
-        fallbackTools: ['get_symbol_context_360', 'read_file', 'analyze_impact'],
+        fallbackTools: ['read_file', 'search_text'],
         confidence: 'high',
         reasonCodes: ['SEMANTIC_CYCLE_DETECTED', cycle.reason],
-        guidance: `[LATS Cycle Break] Repetitive tool loop detected (${cycle.pattern}). Pivot immediately to ${cycle.suggestedRecoveryTool} or inspect structural symbols directly without repeating searches.`,
+        guidance: `[LATS Cycle Break] Repetitive tool loop detected (${cycle.pattern}). Pivot immediately to ${cycle.suggestedRecoveryTool} instead of repeating the same search.`,
         constrainSafe: true,
         cycleDetected: true,
       });
@@ -142,131 +139,84 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
     return selectVisible(input, {
       stage: 'fallback',
       preferredTool: recoveryTool(lastToolName),
-      fallbackTools: ['search_codebase_fast', 'read_file', 'get_symbol_context_360'],
+      fallbackTools: ['search_text', 'read_file', 'list_files'],
       confidence: 'medium',
       reasonCodes: ['LAST_TOOL_FAILED', 'FAIL_OPEN_RECOVERY'],
-      guidance: 'The last retrieval step failed. Recover with an independent evidence source and preserve the full tool set if none is available.',
+      guidance: 'The last retrieval step failed. Recover with an independent, focused search and preserve the full tool set if none is available.',
       constrainSafe: false,
     });
   }
 
-  if (lastToolName === 'search_codebase_fast') {
+  if (lastToolName === 'search_text' || lastToolName === 'search_codebase_fast') {
     const hit = extractBestSymbolHit(result);
     if (hit?.symbol) {
       return selectVisible(input, {
         stage: 'symbol_context',
-        preferredTool: 'get_symbol_context_360',
-        fallbackTools: ['read_compressed_code', 'read_file'],
-        suggestedArgs: { symbol: hit.symbol, path: hit.path },
+        preferredTool: 'read_file',
+        fallbackTools: ['search_text', 'list_files'],
+        suggestedArgs: { path: hit.path },
         confidence: 'high',
-        reasonCodes: ['SEARCH_FOUND_SYMBOL', 'GRAPH_BEFORE_BODY'],
-        guidance: `Search localized ${hit.symbol} in ${hit.path}. Fetch callers, callees, dependencies, and related tests before opening the implementation body.`,
+        reasonCodes: ['SEARCH_FOUND_SYMBOL', 'READ_BEFORE_BODY'],
+        guidance: `Search localized ${hit.symbol} in ${hit.path}. Read that region before editing; search again only if the symbol is not in it.`,
         constrainSafe: true,
       });
     }
     const paths = extractPaths(result);
     return selectVisible(input, {
       stage: 'candidate_localization',
-      preferredTool: paths.length > 1 ? 'read_compressed_code' : 'read_file',
-      fallbackTools: paths.length > 1 ? ['read_file', 'get_symbol_context_360'] : ['read_compressed_code', 'search_codebase_fast'],
-      suggestedArgs: paths.length > 1
-        ? { paths: paths.slice(0, 12), fidelity: 'adaptive' }
-        : paths[0] ? { path: paths[0], outlineOnly: true } : undefined,
+      preferredTool: 'read_file',
+      fallbackTools: ['search_text', 'list_files'],
+      suggestedArgs: paths[0] ? { path: paths[0] } : undefined,
       confidence: paths.length > 0 ? 'high' : 'low',
-      reasonCodes: paths.length > 1 ? ['MULTI_FILE_CANDIDATES', 'COMPRESS_BEFORE_DETAIL'] : ['NO_EXACT_SYMBOL', 'OUTLINE_BEFORE_DETAIL'],
+      reasonCodes: paths.length > 1 ? ['MULTI_FILE_CANDIDATES', 'READ_BEST_CANDIDATE'] : ['NO_EXACT_SYMBOL', 'BROADEN_QUERY'],
       guidance: paths.length > 1
-        ? `Search found ${paths.length} candidate files. Read their contracts together with an adaptive compressed bundle.`
-        : 'Search did not identify a unique symbol. Inspect a candidate outline or broaden the query without guessing line ranges.',
+        ? `Search found ${paths.length} candidate files. Read the most likely one first, then narrow with a targeted search.`
+        : 'Search did not identify a unique symbol. Broaden the query or inspect the workspace layout without guessing line ranges.',
       constrainSafe: paths.length > 0,
-    });
-  }
-
-  if (lastToolName === 'read_compressed_code') {
-    const segment = extractBestSegment(result);
-    if (segment?.symbol) {
-      return selectVisible(input, {
-        stage: 'symbol_context',
-        preferredTool: 'get_symbol_context_360',
-        fallbackTools: ['read_file', 'query_call_graph'],
-        suggestedArgs: { symbol: segment.symbol, path: segment.path },
-        confidence: 'high',
-        reasonCodes: ['COMPRESSED_FOUND_FOCUS', 'GRAPH_BEFORE_BODY'],
-        guidance: `The multi-file bundle localized ${segment.symbol}. Resolve its blast radius and tests in one graph query.`,
-        constrainSafe: true,
-      });
-    }
-    const paths = extractPaths(result);
-    return selectVisible(input, {
-      stage: 'candidate_localization',
-      preferredTool: 'read_file',
-      fallbackTools: ['search_codebase_fast', 'get_symbol_context_360'],
-      suggestedArgs: paths[0] ? { path: paths[0], outlineOnly: true } : undefined,
-      confidence: paths.length > 0 ? 'medium' : 'low',
-      reasonCodes: ['COMPRESSED_NO_FOCUS_SYMBOL', 'LOCALIZE_WITH_OUTLINE'],
-      guidance: 'The bundle established contracts but no unique focus symbol. Read one candidate outline before selecting an implementation body.',
-      constrainSafe: paths.length > 0,
-    });
-  }
-
-  if (lastToolName === 'get_symbol_context_360') {
-    const context = result?.context360 || result;
-    const symbol = stringValue(context?.symbol);
-    const path = stringValue(context?.file || context?.path);
-    return selectVisible(input, {
-      stage: 'exact_implementation',
-      preferredTool: 'read_file',
-      fallbackTools: ['inspect_symbol', 'query_call_graph'],
-      suggestedArgs: symbol && path ? { path, symbol } : undefined,
-      confidence: symbol && path ? 'high' : 'low',
-      reasonCodes: symbol && path ? ['GRAPH_CONTEXT_ACQUIRED', 'READ_EXACT_BODY'] : ['GRAPH_CONTEXT_INCOMPLETE', 'FAIL_OPEN_RECOVERY'],
-      guidance: symbol && path
-        ? `Graph context is available. Read only the exact ${symbol} declaration in ${path}; avoid reopening the whole file.`
-        : 'The graph response lacks a resolvable definition. Fall back to symbol inspection or search.',
-      constrainSafe: Boolean(symbol && path),
-    });
-  }
-
-  if (lastToolName === 'read_file' && stringValue(result?.symbol)) {
-    const symbol = stringValue(result.symbol)!;
-    const path = stringValue(result.path);
-    return selectVisible(input, {
-      stage: 'ready_for_mutation',
-      preferredTool: 'analyze_impact',
-      fallbackTools: ['read_file', 'query_call_graph', 'get_diagnostics', 'replace_text'],
-      suggestedArgs: { ...(path ? { path } : {}), symbol, depth: 2 },
-      confidence: result?.completeDeclaration === false ? 'medium' : 'high',
-      reasonCodes: ['EXACT_BODY_ACQUIRED', 'IMPACT_BEFORE_MUTATION'],
-      guidance: `The exact ${symbol} body is now available. Check upstream impact once, then mutate and run the related tests; do not cycle back to discovery without new evidence.`,
-      constrainSafe: true,
-      abstainRetrieval: true,
     });
   }
 
   if (lastToolName === 'read_file') {
     const path = stringValue(result?.path);
+    const symbol = stringValue(result?.symbol);
+    if (symbol && result?.completeDeclaration !== false) {
+      return selectVisible(input, {
+        stage: 'ready_for_mutation',
+        preferredTool: 'replace_text',
+        fallbackTools: ['read_file', 'run_command'],
+        suggestedArgs: path ? { path } : undefined,
+        confidence: 'high',
+        reasonCodes: ['EXACT_BODY_ACQUIRED', 'MUTATE_THEN_VERIFY'],
+        guidance: `The exact ${symbol} body is available. Apply a bounded mutation and verify with run_command; do not cycle back to discovery without new evidence.`,
+        constrainSafe: true,
+        abstainRetrieval: true,
+      });
+    }
     const candidate = firstOutlineSymbol(result);
     return selectVisible(input, {
-      stage: candidate ? 'symbol_context' : 'candidate_localization',
-      preferredTool: candidate ? 'get_symbol_context_360' : 'search_codebase_fast',
-      fallbackTools: candidate ? ['read_file', 'query_call_graph'] : ['read_compressed_code', 'get_symbol_context_360'],
-      suggestedArgs: candidate ? { symbol: candidate, ...(path ? { path } : {}) } : undefined,
-      confidence: candidate ? 'high' : 'low',
-      reasonCodes: candidate ? ['OUTLINE_FOUND_SYMBOL', 'GRAPH_BEFORE_BODY'] : ['RANGE_READ_NO_SYMBOL', 'RELOCALIZE'],
+      stage: 'candidate_localization',
+      preferredTool: 'search_text',
+      fallbackTools: ['read_file', 'list_files'],
+      suggestedArgs: candidate
+        ? { query: candidate, isRegex: false }
+        : input.userRequest?.trim() ? { query: input.userRequest.trim() } : undefined,
+      confidence: candidate ? 'medium' : 'low',
+      reasonCodes: candidate ? ['OUTLINE_FOUND_SYMBOL', 'LOCATE_EXACT_BODY'] : ['RANGE_READ_NO_SYMBOL', 'RELOCALIZE'],
       guidance: candidate
-        ? `The outline exposed ${candidate}. Acquire graph context before its exact body.`
-        : 'A range read did not establish a unique symbol. Relocalize instead of scrolling through arbitrary line windows.',
+        ? `The outline exposed ${candidate}. Locate its exact declaration with a focused search_text query before mutating.`
+        : 'A range read did not establish a unique symbol. Relocalize with a focused search_text query instead of scrolling through arbitrary line windows.',
       constrainSafe: Boolean(candidate),
     });
   }
 
   return selectVisible(input, {
     stage: 'broad_discovery',
-    preferredTool: 'search_codebase_fast',
-    fallbackTools: ['get_architecture_topology', 'read_compressed_code', 'get_symbol_context_360'],
-    suggestedArgs: input.userRequest?.trim() ? { query: input.userRequest.trim(), contextMode: 'adaptive_bundle' } : undefined,
+    preferredTool: 'search_text',
+    fallbackTools: ['list_files', 'read_file'],
+    suggestedArgs: input.userRequest?.trim() ? { query: input.userRequest.trim() } : undefined,
     confidence: input.userRequest?.trim() ? 'medium' : 'low',
     reasonCodes: ['UNKNOWN_SCOPE', 'BROAD_TO_NARROW'],
-    guidance: 'Start with repository-wide localization. Use a multi-file compressed view only after candidate paths exist, then narrow through symbol graph context to one exact body.',
+    guidance: 'Start with a focused repository search, then read the best candidate. Do not guess line ranges.',
     constrainSafe: false,
   });
 }
@@ -291,7 +241,7 @@ function detectTrajectoryCycle(trajectory: TrajectoryStep[]): {
       detected: true,
       pattern: `${tool} x 3`,
       reason: 'REPEATED_IDENTICAL_TOOL_CALLS',
-      suggestedRecoveryTool: tool === 'search_codebase_fast' ? 'get_symbol_context_360' : 'read_file',
+      suggestedRecoveryTool: tool === 'search_text' ? 'read_file' : 'search_text',
     };
   }
 
@@ -306,11 +256,11 @@ function detectTrajectoryCycle(trajectory: TrajectoryStep[]): {
       detected: true,
       pattern: `${toolNames[0]} <-> ${toolNames[1]}`,
       reason: 'PING_PONG_OSCILLATION',
-      suggestedRecoveryTool: 'get_symbol_context_360',
+      suggestedRecoveryTool: 'read_file',
     };
   }
 
-  return { detected: false, reason: '', suggestedRecoveryTool: 'search_codebase_fast' };
+  return { detected: false, reason: '', suggestedRecoveryTool: 'search_text' };
 }
 
 export class ReliableToolOrchestrationTelemetry {
@@ -341,7 +291,7 @@ export class ReliableToolOrchestrationTelemetry {
     if (actualTool === decision.selectedTool) this.followed++;
     else if (decision.fallbackTools.includes(actualTool)) this.fallbackSelections++;
     if (this.previousTool === 'read_file' && actualTool === 'read_file' && !result?.symbol) this.exactBodyRoundTrips++;
-    if (decision.stage === 'ready_for_mutation' && RELIABLE_CONTEXT_TOOL_NAMES.has(actualTool) && actualTool !== 'analyze_impact' && actualTool !== 'query_call_graph' && actualTool !== 'read_file') {
+    if (decision.stage === 'ready_for_mutation' && RELIABLE_CONTEXT_TOOL_NAMES.has(actualTool) && actualTool !== 'read_file') {
       this.invalidCycles++;
     }
     this.previousTool = actualTool;
@@ -371,8 +321,26 @@ function selectVisible(input: ToolRouteInput, partial: Omit<ToolRouteDecision, '
   const visible = input.visibleToolNames ? new Set(input.visibleToolNames) : undefined;
   const candidates = [partial.preferredTool, ...partial.fallbackTools].filter((tool): tool is string => Boolean(tool));
   const selectedTool = visible ? candidates.find((tool) => visible.has(tool)) : partial.preferredTool;
+
+  let preferredTool = partial.preferredTool;
+  let fallbackTools = partial.fallbackTools;
+  let guidance = partial.guidance;
+
+  if (visible) {
+    if (selectedTool) {
+      preferredTool = selectedTool;
+    }
+    fallbackTools = partial.fallbackTools.filter((tool) => visible.has(tool) && tool !== preferredTool);
+    if (partial.preferredTool && !visible.has(partial.preferredTool) && selectedTool) {
+      guidance = guidance.replace(new RegExp(`\\b${partial.preferredTool}\\b`, 'g'), selectedTool);
+    }
+  }
+
   return {
     ...partial,
+    preferredTool,
+    fallbackTools,
+    guidance,
     ...(selectedTool ? { selectedTool } : {}),
     failOpen: Boolean(visible && !selectedTool),
     constrainSafe: partial.constrainSafe && Boolean(selectedTool),
@@ -391,17 +359,6 @@ function extractBestSymbolHit(result: any): { path: string; symbol?: string } | 
   return firstPath ? { path: firstPath } : undefined;
 }
 
-function extractBestSegment(result: any): { path: string; symbol?: string } | undefined {
-  const segments = Array.isArray(result?.segments) ? result.segments : [];
-  const ranked = [...segments].sort((left, right) => fidelityRank(right?.fidelity) - fidelityRank(left?.fidelity));
-  for (const segment of ranked) {
-    const path = stringValue(segment?.path);
-    if (!path) continue;
-    return { path, symbol: stringValue(segment?.symbol) };
-  }
-  return undefined;
-}
-
 function extractPaths(result: any): string[] {
   const candidates = [
     ...(Array.isArray(result?.hits) ? result.hits : []),
@@ -417,17 +374,8 @@ function firstOutlineSymbol(result: any): string | undefined {
   return first ? stringValue(first.qualifiedName || first.name) : undefined;
 }
 
-function fidelityRank(value: unknown): number {
-  if (value === 'full') return 3;
-  if (value === 'preview') return 2;
-  if (value === 'fold') return 1;
-  return 0;
-}
-
 function recoveryTool(lastToolName?: string): string {
-  if (lastToolName === 'get_symbol_context_360') return 'read_file';
-  if (lastToolName === 'read_file') return 'search_codebase_fast';
-  return 'search_codebase_fast';
+  return lastToolName === 'search_text' ? 'read_file' : 'search_text';
 }
 
 function stringValue(value: unknown): string | undefined {

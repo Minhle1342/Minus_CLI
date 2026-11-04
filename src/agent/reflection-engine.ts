@@ -48,20 +48,13 @@ export function isExploratoryCommand(
 
 const PASSIVE_INSPECTION_TOOLS = new Set([
   'read_file',
-  'read_compressed_code',
   'list_files',
-  'list_dir',
-  'grep_search',
   'search_codebase_fast',
   'search_text',
-  'view_outline',
-  'inspect_symbol',
-  'get_diagnostics',
-  'git_status',
-  'git_diff',
-  'git_log',
   'read_url_content',
   'search_web',
+  'web_search',
+  'web_fetch',
 ]);
 
 /**
@@ -374,36 +367,7 @@ export class ReflectionEngine {
         ? `Command failed (exit: ${result.exitCode}): ${detectiveReport.primaryDefect}${detectiveReport.failingSourceLine ? ` | Failing code: ${detectiveReport.failingSourceLine}` : ''}`
         : `Command failed (exit: ${result.exitCode}).`;
     } 
-    // 3. Phân tích lỗi áp dụng patch apply_patch
-    else if (toolName === 'apply_patch' && (result.error || result.errorCode)) {
-      isFailure = true;
-      this.consecutiveFailures++;
-      this.trackFailureSignature(toolName, result);
-
-      const details = result.diagnostic || result.error || result.errorCode;
-      const failedHunkMsg = result.failedHunkNumber ? ` (Hunk #${result.failedHunkNumber})` : '';
-      const targetFileMsg = result.failedFile ? ` for file "${result.failedFile}"` : '';
-      const similarFilesMsg = result.similarFiles?.length
-        ? `📍 DISCOVERED SIMILAR FILES IN WORKSPACE: ${JSON.stringify(result.similarFiles)}. Retrying with "${result.similarFiles[0]}" may fix path mismatches.`
-        : '';
-      const suggestedReadMsg = result.suggestedRead
-        ? `Call read_file with parameters: ${JSON.stringify(result.suggestedRead)}.`
-        : 'Use read_file to inspect the exact current lines and context in the target file.';
-
-      reflectionPrompt = [
-        `\n⚠️ [SELF-REFLECTION - PATCH APPLICATION FAILED${failedHunkMsg}${targetFileMsg}]`,
-        `Error code: ${result.errorCode || 'PATCH_APPLY_FAILED'}`,
-        `Details: ${details}`,
-        similarFilesMsg,
-        `💡 CODEX CLI HUNK RECOVERY PROTOCOL:`,
-        `1. ${suggestedReadMsg}`,
-        `2. Recommended Fallback: Use "replace_text" with exact oldText from read_file for 100% deterministic mutation.`,
-        `3. If creating a new patch: Narrow context lines in @@ hunks to 1 unique line to eliminate drift.`,
-      ].filter(Boolean).join('\n');
-
-      advice = `apply_patch failed${failedHunkMsg} (${result.errorCode || 'unknown'}). Read exact file region before retrying.`;
-    }
-    // 4. Phân tích lỗi sửa file replace_text không khớp
+    // 3. Phân tích lỗi sửa file replace_text không khớp
     else if (toolName === 'replace_text' && result.error) {
       isFailure = true;
       this.consecutiveFailures++;
@@ -428,27 +392,7 @@ export class ReflectionEngine {
 
       advice = `replace_text failed (${result.errorCode || 'unknown'}). Read exact file region before retrying.`;
     }
-    // 5. Phân tích lỗi cập nhật kế hoạch update_plan_task
-    else if (toolName === 'update_plan_task' && (result.error || result.errorCode)) {
-      isFailure = true;
-      this.consecutiveFailures++;
-      this.trackFailureSignature(toolName, result);
-
-      reflectionPrompt = [
-        `\n⚠️ [PLAN MANAGEMENT ERROR - UPDATE TASK FAILED]`,
-        `Error code: ${result.errorCode || 'PLAN_UPDATE_FAILED'}`,
-        `Error details: ${result.error}`,
-        result.hint ? `💡 Hint: ${result.hint}` : '',
-        `👉 ADJUSTMENT RULES:`,
-        `1. If no plan exists: Outline steps directly in your markdown response.`,
-        `2. If this is a simple task: Do not call "update_plan_task"; execute tools directly or answer immediately.`,
-        `3. If evidence is required: Call the corresponding inspection/mutation/verification tool first before marking COMPLETED.`,
-        `4. DO NOT call update_plan_task with the same invalid parameters again!`,
-      ].filter(Boolean).join('\n');
-
-      advice = `Do not call phantom plan tools. Inspect files and execute tools directly or outline steps in markdown.`;
-    }
-    // 6. Phân tích lỗi chung khác
+    // 4. Phân tích lỗi chung khác
     else if (result.error || result.errorCode) {
       isFailure = true;
       this.consecutiveFailures++;
@@ -474,18 +418,8 @@ export class ReflectionEngine {
         this.lastRenderedDetectiveFingerprint = undefined;
         this.failureSignatureStreak = undefined;
       } else if (
-        toolName === 'update_plan_task' &&
-        feedback.args?.status === 'COMPLETED' &&
-        result.success !== false
-      ) {
-        // Reset khi task được đánh dấu hoàn thành
-        this.consecutiveFailures = 0;
-        this.lastErrorFingerprint = undefined;
-        this.lastRenderedDetectiveFingerprint = undefined;
-        this.failureSignatureStreak = undefined;
-      } else if (
         !PASSIVE_INSPECTION_TOOLS.has(toolName) &&
-        !['replace_text', 'apply_patch', 'write_file', 'create_file', 'delete_file', 'move_file'].includes(toolName)
+        !['replace_text', 'write_file', 'delete_file'].includes(toolName)
       ) {
         // Các tool tiện ích khác (không phải công cụ đọc/sửa mã nguồn) thành công thì reset
         this.consecutiveFailures = 0;
@@ -514,8 +448,8 @@ export class ReflectionEngine {
           `\n🔍 [LSP COMPILER & TYPE DIAGNOSTICS DETECTED]:`,
           ...diagLines,
           `💡 LSP ACTIONABLE FIX GUIDANCE:`,
-          `  - Use "inspect_symbol" to inspect symbol definitions and type signatures.`,
-          `  - Use "get_diagnostics" to re-verify the modified file.`,
+          `  - Use "read_file" on the failing region to inspect symbol definitions and type signatures.`,
+          `  - Re-run the typecheck or test command via "run_command" to re-verify the modified file.`,
         ].join('\n');
 
         reflectionPrompt = reflectionPrompt ? `${reflectionPrompt}\n${lspSection}` : lspSection;

@@ -2574,12 +2574,12 @@ export class AgentLoop {
         const trimmedRepositoryContext = isHighHistoryPressure ? '' : repositoryContext;
         const trimmedHarnessGuidance = isHighHistoryPressure
           ? (classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
-            ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or inspect_symbol to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
+            ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or search_text/read_file to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
             : undefined)
           : [
             promptDecision.harnessGuidance,
             classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
-              ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or inspect_symbol to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
+              ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or search_text/read_file to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
               : undefined,
           ].filter(Boolean).join('\n');
 

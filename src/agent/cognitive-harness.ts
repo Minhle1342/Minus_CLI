@@ -518,7 +518,7 @@ export class CognitiveHarness {
         const leadingInfo = detectLeadingQuery(request);
         const negativeGate = [
           '🔒 [PHASE LOCK: EXPLORE] NEVER modify production files or run mutations during EXPLORATION.',
-          'NEVER assume root cause without reading the exact offending lines with read_file/view_file first.',
+          'NEVER assume root cause without reading the exact offending lines with read_file first.',
           'NEVER guess code defects without extracting exact file, line, and column from logs or stack traces.',
           'NEVER fabricate mock test data inside production code.',
           '🔒 [ANTI-SYCOPHANCY GATE]: Do not uncritically accept user premises or leading questions. Test the Null Hypothesis (H0) against independent code facts.',
@@ -538,7 +538,7 @@ export class CognitiveHarness {
             : 'Confirm whether the symptom is reproducible and isolate the defect locus before attempting any code fix.',
           falsificationCriteria: 'If gathered facts contradict the initial diagnosis, pivot exploration immediately to alternative components.',
           executionTopology: [
-            'Step 1 (Targeted Inspection): Read suspected files, configs, and caller chains with read_file/view_file.',
+            'Step 1 (Targeted Inspection): Read suspected files, configs, and caller chains with read_file.',
             'Step 2 (Defect Localization): Pinpoint exact source lines causing incorrect state.',
             'Step 3 (Reproduction Evidence): Verify behavior with safe read/run commands without mutating production code.',
             'Step 4 (Readiness Hand-off): Once root cause is proven with empirical evidence, unlock IMPLEMENT phase.',
@@ -592,7 +592,7 @@ export class CognitiveHarness {
       const negativeGate = [
         'NEVER fabricate mock test data inside production code to force a green test.',
         'NEVER comment out or silence compiler/LSP diagnostics.',
-        'NEVER modify production code blindly without inspecting actual lines with read_file/view_file first.',
+        'NEVER modify production code blindly without inspecting actual lines with read_file first.',
         'NEVER attempt bugfix code changes without writing or running a reproduction test (Agentless reproduction protocol).',
         'NEVER guess or hallucinate test commands or binary output paths without inspecting project manifests or confirming file existence with list_files.',
         'NEVER declare victory without running empirical verification (e.g. npm run build / test).',

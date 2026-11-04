@@ -433,7 +433,7 @@ export class PromptAttachmentProcessor {
   /** Single canonical anchor rule (kept short: injected into every attach turn). */
   private static readonly INVESTIGATION_SCOPE_DIRECTIVE = [
     '[INVESTIGATION SCOPE - ATTACHMENT ANCHOR RULE]',
-    'User @-attached file(s) are INVESTIGATION ANCHORS, not the whole truth: inspect the hop-1/hop-2 files listed above with read_file / grep_search / analyze_impact before concluding root cause or editing code.',
+    'User @-attached file(s) are INVESTIGATION ANCHORS, not the whole truth: inspect the hop-1/hop-2 files listed above with read_file / search_text before concluding root cause or editing code.',
     'FORBIDDEN: concluding root cause or applying fixes from anchor content alone without checking callers/dependencies.',
   ].join('\n');
 

@@ -946,7 +946,7 @@ export class PlanManager {
       `Ready tasks: ${graph.readyTaskIds.join(', ') || 'none'}; safe parallel batches: ${graph.parallelBatches.map((batch) => `[${batch.join(',')}]`).join(' ') || 'none'}`,
       ...lines,
       activeTasks.length > 0
-        ? `ACTIVE TASKS: ${activeTasks.map((task) => `#${task.id}`).join(', ')}. Work only on graph-ready tasks and update status via update_plan_task.`
+        ? `ACTIVE TASKS: ${activeTasks.map((task) => `#${task.id}`).join(', ')}. Work only on graph-ready tasks.`
         : 'All tasks are completed.',
     ].join('\n');
   }

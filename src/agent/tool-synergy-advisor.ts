@@ -1,6 +1,5 @@
 import type { ToolFailureDiagnosis } from '../tools/tool-use-guardian.js';
 import { ROOT_CAUSE_STEPS } from '../llm/sections/shared.js';
-import { resolvePatchFormatSpec } from '../llm/sections/tools.js';
 import { isMutationTool } from '../tools/diff-generator.js';
 import { decideReliableToolRoute, type TrajectoryStep } from './reliable-tool-orchestration.js';
 import { isToolResultFailure, isVerificationCommand } from './completion-evidence.js';
@@ -83,8 +82,8 @@ export class ToolSynergyAdvisor {
     if (hasSharedContextConflicts || (lastToolResult && lastToolResult.conflict)) {
       return {
         playbook: 'E_MULTI_AGENT',
-        guidance: 'OCC Version Conflict detected on shared context key. Call "read_shared_context" to inspect latest versionHash before attempting "write_shared_context".',
-        suggestedTools: ['read_shared_context', 'write_shared_context'],
+        guidance: 'OCC Version Conflict detected on a shared context key. Re-read the current file content with "read_file" before attempting the write again.',
+        suggestedTools: ['read_file', 'replace_text'],
       };
     }
 
@@ -99,24 +98,6 @@ export class ToolSynergyAdvisor {
         guidance: 'Background task is active. Wait reactively for completion or use "manage_task(send_input)" if interactive prompt is waiting.',
         suggestedTools: ['manage_task'],
       };
-    }
-
-    // 2a. Browser automation flow (Playbook H: Playwright MCP)
-    if (lastToolName && lastToolName.startsWith('browser_')) {
-      if (lastToolName === 'browser_navigate' || lastToolName === 'browser_click' || lastToolName === 'browser_type' || lastToolName === 'browser_wait') {
-        return {
-          playbook: 'H_BROWSER',
-          guidance: 'Browser action done. Call "browser_snapshot" to get fresh refs before next click/type. Sequence: navigate -> snapshot -> click/type -> wait -> snapshot. Call "browser_close" when done.',
-          suggestedTools: ['browser_snapshot', 'browser_click', 'browser_type', 'browser_wait', 'browser_close'],
-        };
-      }
-      if (lastToolName === 'browser_snapshot' || lastToolName === 'browser_screenshot') {
-        return {
-          playbook: 'H_BROWSER',
-          guidance: 'Snapshot captured. Use refs (e.g. e12) with "browser_click"/"browser_type" for SPA/login/form interaction.',
-          suggestedTools: ['browser_click', 'browser_type', 'browser_wait', 'browser_close'],
-        };
-      }
     }
 
     // 2.5. Fast-path: run_command vừa chạy test thành công → tái sử dụng bằng chứng, kết luận (Step Efficiency Boost)
@@ -135,24 +116,6 @@ export class ToolSynergyAdvisor {
         playbook: 'C_MUTATION',
         guidance: 'The observed verification command completed with exit 0. Reuse this evidence; check the active task acceptance criteria, evidence freshness and remaining authorized workflow before concluding the turn. Do not infer that unrelated checks passed.',
         suggestedTools: [],
-      };
-    }
-
-    // 2.5. Sự cố apply_patch (Lỗi format patch hoặc FUZZY_CANDIDATE_FOUND) -> gợi ý chuyển sang replace_text
-    if (
-      lastToolName === 'apply_patch' &&
-      lastToolResult &&
-      (lastToolResult.error || lastToolResult.fuzzyCandidate || lastToolResult.status === 'FUZZY_CANDIDATE_FOUND')
-    ) {
-      const isFuzzy = Boolean(lastToolResult.fuzzyCandidate || lastToolResult.status === 'FUZZY_CANDIDATE_FOUND');
-      const reason = isFuzzy
-        ? 'FUZZY_CANDIDATE_FOUND (Fuzz Level 3 match). Disk was NOT mutated to avoid accidental corruption.'
-        : `Patch application failed: ${lastToolResult.error || 'Invalid patch structure'}`;
-      const patchSpec = resolvePatchFormatSpec(context.lastTargetFile);
-      return {
-        playbook: 'C_MUTATION',
-        guidance: `[PATCH FORMAT & FUZZ ADVISORY]: ${reason}\n${patchSpec}\n→ Action: Call "read_file" on the target lines to obtain fresh contentHash and line offsets, then provide exact replacement with "replace_text".`,
-        suggestedTools: ['read_file', 'replace_text'],
       };
     }
 
@@ -236,7 +199,7 @@ export class ToolSynergyAdvisor {
     if (
       activeTaskTitle
       || userRequest
-      || ['search_codebase_fast', 'read_compressed_code', 'get_symbol_context_360', 'read_file'].includes(lastToolName || '')
+      || ['search_text', 'read_file'].includes(lastToolName || '')
     ) {
       const route = decideReliableToolRoute({
         userRequest: userRequest || activeTaskTitle,
@@ -255,19 +218,7 @@ export class ToolSynergyAdvisor {
       };
     }
 
-    // 6. Vừa tra cứu symbol đơn lẻ (inspect_symbol)
-    if (lastToolName === 'inspect_symbol' && lastToolResult && !lastToolResult.error) {
-      const callerHint = context.callGraphContext?.callers?.length
-        ? ` Direct callers: [${context.callGraphContext.callers.slice(0, 3).join(', ')}].`
-        : '';
-      return {
-        playbook: 'G_BLAST_RADIUS',
-        guidance: `Symbol definition inspected.${callerHint} Inspect exact implementation lines with read_file or search occurrences with search_text.`,
-        suggestedTools: ['read_file', 'search_text', 'replace_text'],
-      };
-    }
-
-    // 7. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
+    // 6. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
     return {
       playbook: 'GENERAL',
       guidance: 'Explore with list_files and search_text, inspect implementation details with read_file, edit with replace_text or write_file, and verify with run_command.',
@@ -303,14 +254,27 @@ export class ToolSynergyAdvisor {
       multi_replace_file_content: 'replace_text',
       search_web: 'web_search',
       read_url_content: 'web_fetch',
+      // Phantoms from removed tool modules: map before the prompt is emitted.
+      view_file: 'read_file',
+      inspect_symbol: 'read_file',
+      read_compressed_code: 'read_file',
+      get_symbol_context_360: 'read_file',
+      get_diagnostics: 'run_command',
+      analyze_impact: 'search_text',
+      query_call_graph: 'search_text',
+      apply_patch: 'replace_text',
     };
     const sanitizedTools = advice.suggestedTools
       .map((t) => ADVICE_TOOL_MAP[t] || t)
-      .filter((t) => CANONICAL_VISIBLE_TOOLS.has(t) || t.startsWith('browser_'))
+      .filter((t) => CANONICAL_VISIBLE_TOOLS.has(t))
       .filter((t, i, arr) => arr.indexOf(t) === i);
     const toolsText = sanitizedTools.length > 0
       ? sanitizedTools.join(', ')
       : '(None - Conclude with Final Answer)';
-    return `[TOOL PLAYBOOK GUIDANCE - ${advice.playbook}]\n→ Recommended next actions: ${advice.guidance}\n→ Suggested tools: ${toolsText}`;
+    let sanitizedGuidance = advice.guidance;
+    for (const [phantom, canonical] of Object.entries(ADVICE_TOOL_MAP)) {
+      sanitizedGuidance = sanitizedGuidance.replace(new RegExp(`\\b${phantom}\\b`, 'g'), canonical);
+    }
+    return `[TOOL PLAYBOOK GUIDANCE - ${advice.playbook}]\n→ Recommended next actions: ${sanitizedGuidance}\n→ Suggested tools: ${toolsText}`;
   }
 }

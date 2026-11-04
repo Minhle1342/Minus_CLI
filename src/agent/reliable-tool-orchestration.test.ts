@@ -75,39 +75,31 @@ test('Python parser follows indentation beyond the former twenty-line cutoff', (
   assert.doesNotMatch(slice.code || '', /def after/);
 });
 
-test('routing progresses search to graph context to exact body to impact', () => {
+test('routing progresses search to exact body to mutation', () => {
   const afterSearch = decideReliableToolRoute({
-    lastToolName: 'search_codebase_fast',
+    lastToolName: 'search_text',
     lastToolResult: { hits: [{ path: 'src/service.ts', symbol: 'Service.run' }] },
   });
   assert.equal(afterSearch.stage, 'symbol_context');
-  assert.equal(afterSearch.selectedTool, 'get_symbol_context_360');
-  assert.deepEqual(afterSearch.suggestedArgs, { symbol: 'Service.run', path: 'src/service.ts' });
-
-  const afterContext = decideReliableToolRoute({
-    lastToolName: 'get_symbol_context_360',
-    lastToolResult: { context360: { symbol: 'run', file: ' shorts/service.ts' } },
-  });
-  assert.equal(afterContext.stage, 'exact_implementation');
-  assert.equal(afterContext.selectedTool, 'read_file');
-  assert.deepEqual(afterContext.suggestedArgs, { path: 'shorts/service.ts', symbol: 'run' });
+  assert.equal(afterSearch.selectedTool, 'read_file');
+  assert.deepEqual(afterSearch.suggestedArgs, { path: 'src/service.ts' });
 
   const afterBody = decideReliableToolRoute({
     lastToolName: 'read_file',
     lastToolResult: { path: 'src/service.ts', symbol: 'run', completeDeclaration: true },
   });
   assert.equal(afterBody.stage, 'ready_for_mutation');
-  assert.equal(afterBody.selectedTool, 'analyze_impact');
+  assert.equal(afterBody.selectedTool, 'replace_text');
   assert.equal(afterBody.constrainSafe, true);
 });
 
-test('multi-file search uses adaptive compression and unavailable tools fail open', () => {
-  const compressed = decideReliableToolRoute({
-    lastToolName: 'search_codebase_fast',
+test('multi-file search reads the best candidate and unavailable tools fail open', () => {
+  const multi = decideReliableToolRoute({
+    lastToolName: 'search_text',
     lastToolResult: { hits: [{ path: 'src/a.ts' }, { path: 'src/b.ts' }, { path: 'src/a.ts' }] },
   });
-  assert.equal(compressed.selectedTool, 'read_compressed_code');
-  assert.deepEqual(compressed.suggestedArgs, { paths: ['src/a.ts', 'src/b.ts'], fidelity: 'adaptive' });
+  assert.equal(multi.selectedTool, 'read_file');
+  assert.deepEqual(multi.suggestedArgs, { path: 'src/a.ts' });
 
   const unavailable = decideReliableToolRoute({
     userRequest: 'understand auth flow',
@@ -118,34 +110,35 @@ test('multi-file search uses adaptive compression and unavailable tools fail ope
   assert.equal(unavailable.constrainSafe, false);
 
   const declarations = [
-    { name: 'search_codebase_fast' },
-    { name: 'read_compressed_code' },
-    { name: 'get_symbol_context_360' },
+    { name: 'search_text' },
+    { name: 'list_files' },
     { name: 'read_file' },
     { name: 'replace_text' },
+    { name: 'run_command' },
   ];
-  const enforced = applyReliableToolRouteToDeclarations(declarations, compressed, 'enforce');
+  const enforced = applyReliableToolRouteToDeclarations(declarations, multi, 'enforce');
   assert.deepEqual(enforced.map((tool) => tool.name), [
-    'read_compressed_code',
-    'get_symbol_context_360',
+    'search_text',
+    'list_files',
     'read_file',
     'replace_text',
+    'run_command',
   ]);
   assert.equal(applyReliableToolRouteToDeclarations(declarations, unavailable, 'enforce').length, declarations.length);
-  assert.equal(applyReliableToolRouteToDeclarations(declarations, compressed, 'shadow').length, declarations.length);
+  assert.equal(applyReliableToolRouteToDeclarations(declarations, multi, 'shadow').length, declarations.length);
 });
 
-test('advisor emits actionable reliable-retrieval guidance without an invalid 360 call', () => {
+test('advisor emits actionable reliable-retrieval guidance without removed graph tools', () => {
   const advisor = new ToolSynergyAdvisor();
   const first = advisor.advise({ activeTaskTitle: 'Understand authentication flow' });
-  assert.equal(first.suggestedTools[0], 'search_codebase_fast');
+  assert.equal(first.suggestedTools[0], 'search_text');
   assert.match(first.guidance, /broad_discovery/);
 
   const afterOutline = advisor.advise({
     lastToolName: 'read_file',
     lastToolResult: { path: 'src/auth.ts', symbols: [{ name: 'authenticate', qualifiedName: 'Auth.authenticate' }] },
   });
-  assert.equal(afterOutline.suggestedTools[0], 'get_symbol_context_360');
+  assert.equal(afterOutline.suggestedTools[0], 'search_text');
   assert.match(afterOutline.guidance, /Auth\.authenticate/);
 });
 
@@ -156,10 +149,10 @@ test('mode resolver and telemetry expose adoption, fallback, cycles, and transit
   const telemetry = new ReliableToolOrchestrationTelemetry();
   const discovery = decideReliableToolRoute({ userRequest: 'find parser' });
   telemetry.recordDecision(discovery);
-  telemetry.recordExecution(discovery, 'search_codebase_fast', {});
+  telemetry.recordExecution(discovery, 'search_text', {});
   const ready = decideReliableToolRoute({ lastToolName: 'read_file', lastToolResult: { symbol: 'parse', path: 'src/parser.ts' } });
   telemetry.recordDecision(ready);
-  telemetry.recordExecution(ready, 'search_codebase_fast', {});
+  telemetry.recordExecution(ready, 'search_text', {});
   const snapshot = telemetry.snapshot();
   assert.equal(snapshot.decisions, 2);
   assert.equal(snapshot.followed, 1);
@@ -222,23 +215,23 @@ test('trajectory-aware cycle detection breaks repeated 3x tool loops and ping-po
   // 3x search loop
   const repeated = decideReliableToolRoute({
     trajectory: [
-      { toolName: 'search_codebase_fast' },
-      { toolName: 'search_codebase_fast' },
-      { toolName: 'search_codebase_fast' },
+      { toolName: 'search_text' },
+      { toolName: 'search_text' },
+      { toolName: 'search_text' },
     ],
   });
   assert.equal(repeated.stage, 'cycle_break');
   assert.equal(repeated.cycleDetected, true);
-  assert.equal(repeated.selectedTool, 'get_symbol_context_360');
+  assert.equal(repeated.selectedTool, 'read_file');
   assert.match(repeated.guidance, /CYCLE BREAK/i);
 
   // Ping-pong oscillation: A -> B -> A -> B
   const oscillation = decideReliableToolRoute({
     trajectory: [
-      { toolName: 'search_codebase_fast' },
-      { toolName: 'read_compressed_code' },
-      { toolName: 'search_codebase_fast' },
-      { toolName: 'read_compressed_code' },
+      { toolName: 'search_text' },
+      { toolName: 'read_file' },
+      { toolName: 'search_text' },
+      { toolName: 'read_file' },
     ],
   });
   assert.equal(oscillation.stage, 'cycle_break');
@@ -247,11 +240,11 @@ test('trajectory-aware cycle detection breaks repeated 3x tool loops and ping-po
 
 test('Repoformer abstention gate locks broad discovery tools when evidence is sufficient', () => {
   const allTools = [
-    { name: 'search_codebase_fast' },
-    { name: 'read_compressed_code' },
-    { name: 'get_symbol_context_360' },
+    { name: 'search_text' },
+    { name: 'list_files' },
     { name: 'read_file' },
     { name: 'replace_text' },
+    { name: 'run_command' },
   ];
   const abstained = decideReliableToolRoute({
     evidenceSufficient: true,
@@ -261,18 +254,18 @@ test('Repoformer abstention gate locks broad discovery tools when evidence is su
   assert.equal(abstained.abstainRetrieval, true);
   assert.match(abstained.guidance, /Repoformer Abstention/i);
   const filtered = applyReliableToolRouteToDeclarations(allTools, abstained, 'enforce');
-  assert.equal(filtered.some((t) => t.name === 'search_codebase_fast'), false);
-  assert.equal(filtered.some((t) => t.name === 'read_compressed_code'), false);
+  assert.equal(filtered.some((t) => t.name === 'search_text'), false);
+  assert.equal(filtered.some((t) => t.name === 'list_files'), false);
   assert.equal(filtered.some((t) => t.name === 'replace_text'), true);
 });
 
 test('Repoformer abstention gate preserves read_file in fallbackTools during ready_for_mutation', () => {
   const allTools = [
-    { name: 'search_codebase_fast' },
-    { name: 'read_compressed_code' },
-    { name: 'get_symbol_context_360' },
+    { name: 'search_text' },
+    { name: 'list_files' },
     { name: 'read_file' },
     { name: 'replace_text' },
+    { name: 'run_command' },
   ];
   const abstained = decideReliableToolRoute({
     evidenceSufficient: true,
@@ -283,12 +276,12 @@ test('Repoformer abstention gate preserves read_file in fallbackTools during rea
   assert.equal(filtered.some((t) => t.name === 'replace_text'), true);
 });
 
-test('decideReliableToolRoute passes clean path and symbol args for analyze_impact', () => {
+test('decideReliableToolRoute passes clean path args for the mutation step', () => {
   const route = decideReliableToolRoute({
     lastToolName: 'read_file',
     lastToolResult: { path: 'src/service.ts', symbol: 'run', completeDeclaration: true },
   });
-  assert.equal(route.selectedTool, 'analyze_impact');
-  assert.deepEqual(route.suggestedArgs, { path: 'src/service.ts', symbol: 'run', depth: 2 });
+  assert.equal(route.selectedTool, 'replace_text');
+  assert.deepEqual(route.suggestedArgs, { path: 'src/service.ts' });
 });
 

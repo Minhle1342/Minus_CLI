@@ -54,7 +54,7 @@ export const BUILTIN_ARCHITECTURE_PLAYBOOKS: Record<string, string> = {
    - Single Responsibility: Each class/service owns one cohesive reason to change.
 
 3. **Blast Radius & Contract Preservation:**
-   - Before mutating exported functions, interfaces, or types, inspect all call-sites with \`find_references\` and \`analyze_impact\`.
+   - Before mutating exported functions, interfaces, or types, inspect all call-sites with \`search_text\` and \`read_file\`.
    - Prefer additive, backward-compatible evolutionary extensions over breaking API mutations.
    - Mark deprecated symbols with clear migration paths before removing them.
 

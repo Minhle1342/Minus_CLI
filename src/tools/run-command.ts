@@ -849,7 +849,7 @@ export function detectFileCommandMisuse(command: string): FileMisuseDetection | 
     const filePath = awkMatch[1].replace(/^["']|["']$/g, '');
     return {
       tool: 'read_file',
-      reason: 'Read file content or extract symbols with read_file (symbol) / inspect_symbol',
+      reason: 'Read file content or extract symbols with read_file (symbol)',
       suggestedArgs: { path: filePath },
     };
   }

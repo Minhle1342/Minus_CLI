@@ -234,20 +234,18 @@ test('CriticGate.evaluateExplorationSufficiency advises (not blocks) single-file
   assert.equal(approvedDecision.reasons.length, 0);
 });
 
-test('CriticGate passes measured single-locus fixes with zero callers', () => {
+test('CriticGate advises (not blocks) on single-file bugfix inspection without a reproduction', () => {
   const critic = new CriticGate();
   const supportedHypo = {
     getLatestHypothesis: () => ({ id: 'hypo-1', statement: 'Off-by-one', status: 'supported' }),
   } as any;
-  const measuredSession = {
-    getEvents: () => [
-      ...readEvents('src/target.ts', [{ toolName: 'analyze_impact', result: { callers: 0, risk: 'LOW' } }]),
-    ],
+  const singleFileSession = {
+    getEvents: () => readEvents('src/target.ts'),
   } as any;
 
   const decision = critic.evaluateExplorationSufficiency({
     taskClass: 'bugfix',
-    session: measuredSession,
+    session: singleFileSession,
     targetFilePath: 'src/target.ts',
     hasReproduction: false,
     hypothesisTracker: supportedHypo,
@@ -257,34 +255,23 @@ test('CriticGate passes measured single-locus fixes with zero callers', () => {
 
   assert.equal(decision.allowed, true);
   assert.equal(decision.score, 100);
-  assert.ok(decision.reasons.some((r) => r.includes('single-locus')));
-});
+  assert.ok(decision.reasons.some((r) => r.includes('CAUSAL_TRACE_UNVERIFIED')));
 
-test('CriticGate still blocks when measured callers exist but are uninspected', () => {
-  const critic = new CriticGate();
-  const supportedHypo = {
-    getLatestHypothesis: () => ({ id: 'hypo-1', statement: 'Off-by-one', status: 'supported' }),
+  const twoFileSession = {
+    getEvents: () => [...readEvents('src/target.ts'), ...readEvents('src/caller.ts')],
   } as any;
-  const gapSession = {
-    getEvents: () => [
-      ...readEvents('src/target.ts', [{ toolName: 'analyze_impact', result: { callers: 3, risk: 'MEDIUM' } }]),
-    ],
-  } as any;
-
-  const decision = critic.evaluateExplorationSufficiency({
+  const quiet = critic.evaluateExplorationSufficiency({
     taskClass: 'bugfix',
-    session: gapSession,
+    session: twoFileSession,
     targetFilePath: 'src/target.ts',
     hasReproduction: false,
     hypothesisTracker: supportedHypo,
     risk: 'R3',
     gateMode: 'enforce',
   });
-
-  assert.equal(decision.allowed, false);
-  assert.equal(decision.score, 50);
-  assert.ok(decision.reasons.some((r) => r.includes('CAUSAL_TRACE_INSUFFICIENT')));
+  assert.ok(!quiet.reasons.some((r) => r.includes('CAUSAL_TRACE_UNVERIFIED')));
 });
+
 test('Pillar E2: Exploration Exhaustion Gate is advisory by default and enforceable on request', () => {
   const critic = new CriticGate();
   const emptySession = {

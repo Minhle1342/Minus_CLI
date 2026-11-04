@@ -830,7 +830,7 @@ export class ContextCompactor {
           `> Older exchange turns compressed under LLM Technical State Snapshot:`,
           ``,
           taskStateInput.customLLMText.trim(),
-          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
+          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with read_file before applying surgical edits)`,
           `> (The system will automatically re-inject details if the user refers to the steps above)`,
         ].join('\n')
       : [
@@ -867,7 +867,7 @@ export class ContextCompactor {
           ``,
           `### Chronological Turn Index`,
           ...chronologicalIndex,
-          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
+          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with read_file before applying surgical edits)`,
           `> (The system will automatically re-inject details if the user refers to the steps above)`,
         ].join('\n');
 
@@ -1137,7 +1137,7 @@ export class ContextCompactor {
           `> Older exchange turns compressed under LLM Technical State Snapshot:`,
           ``,
           String((options as any).customLLMText).trim(),
-          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
+          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with read_file before applying surgical edits)`,
           `> (The system will automatically re-inject details if the user refers to the steps above)`,
         ].join('\n')
       : [
@@ -1174,7 +1174,7 @@ export class ContextCompactor {
           ``,
           `### Chronological Turn Index`,
           ...[...priorSynopsisLines, ...synopsisLines].slice(-MAX_SYNOPSIS_INDEX_LINES),
-          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with view_file/read_file before applying surgical edits)`,
+          `\n> (Notice: Prior turn records may reflect historical line numbers; always verify current source state with read_file before applying surgical edits)`,
           `> (The system will automatically re-inject details if the user refers to the steps above)`,
         ].join('\n');
 
@@ -1565,7 +1565,7 @@ export class ContextCompactor {
                 path: r.path,
                 totalLines: outline.totalLines,
                 status: 'masked',
-                observationMask: `[OBSERVATION MASKED: File "${r.path}" (${outline.totalLines || 0} lines). Symbols: ${topSymbols.join(', ') || 'none'}. Full content archived (see archiveId); auto re-injected on reference, else re-read with view_file]`,
+                observationMask: `[OBSERVATION MASKED: File "${r.path}" (${outline.totalLines || 0} lines). Symbols: ${topSymbols.join(', ') || 'none'}. Full content archived (see archiveId); auto re-injected on reference, else re-read with read_file]`,
               };
             }
             // 2b: Command log cũ -> Giữ status gọn
@@ -1646,7 +1646,7 @@ export class ContextCompactor {
               totalLines: outline.totalLines,
               semanticOutline: outline.summary,
               symbols: topSymbols,
-              hint: '[Content compressed into semantic outline. Symbol line numbers reflect snapshot state; always inspect with view_file/read_file before modifying]',
+              hint: '[Content compressed into semantic outline. Symbol line numbers reflect snapshot state; always inspect with read_file before modifying]',
             };
           }
           // Case B: Log chạy lệnh dài -> Giữ Header + Tail của Stack Trace (Phase 2 Hierarchical Pruning)

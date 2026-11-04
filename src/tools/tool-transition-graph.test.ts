@@ -42,11 +42,7 @@ test('ToolTransitionGraph - Correctly evaluates outcome and assigns Markov prior
   const boostWebFetch = graph.getTransitionBoost('web_search', { success: true }, 'web_fetch');
   assert.ok(boostWebFetch >= 0.35, 'web_fetch phải có prior boost >= 0.35 sau web_search');
 
-  // 4. Sau khi formulate_and_verify_hypothesis validated -> create_file được boost
-  const boostPhaseTrans = graph.getTransitionBoost('formulate_and_verify_hypothesis', { status: 'validated' }, 'create_file');
-  assert.ok(boostPhaseTrans >= 0.35, 'create_file phải có boost >= 0.35 khi hypothesis validated');
-
-  // 5. Sau khi verify_subagent_quality -> write_shared_context được boost
+  // 4. Sau khi verify_subagent_quality -> run_command được boost
   const boostPlanTask = graph.getTransitionBoost('verify_subagent_quality', { success: true }, 'run_command');
   assert.ok(boostPlanTask >= 0.32, 'run_command phải có boost >= 0.32 sau verify_subagent_quality');
 

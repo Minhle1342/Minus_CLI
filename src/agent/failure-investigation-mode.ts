@@ -13,7 +13,7 @@ export interface FailureInvestigationMutation {
 
 export interface FailureInvestigationOption {
   id: string;
-  toolName: 'read_file' | 'get_diagnostics' | 'query_call_graph';
+  toolName: 'read_file' | 'search_text' | 'list_files';
   args: Record<string, any>;
   reason: string;
   expectedInformationGain: 'high' | 'medium';
@@ -132,11 +132,11 @@ export function buildFailureInvestigationBrief(input: FailureInvestigationInput)
     });
     if (/\.[cm]?[jt]sx?$/i.test(location.path)) {
       addOption({
-        id: 'diagnose-failure-location',
-        toolName: 'get_diagnostics',
-        args: { path: location.path },
-        reason: 'Check compiler and type diagnostics at the reported TypeScript/JavaScript file.',
-        expectedInformationGain: 'high',
+        id: 'trace-failure-location',
+        toolName: 'search_text',
+        args: { query: '\\b(export|function|class|const)\\b', path: location.path },
+        reason: 'Inspect declarations around the reported TypeScript/JavaScript file before changing it.',
+        expectedInformationGain: 'medium',
       });
     }
   }
@@ -156,8 +156,8 @@ export function buildFailureInvestigationBrief(input: FailureInvestigationInput)
   if (mutationSymbol) {
     addOption({
       id: 'trace-mutated-symbol-consumers',
-      toolName: 'query_call_graph',
-      args: { symbolName: mutationSymbol, direction: 'callers', depth: 1, pruneNoise: true },
+      toolName: 'search_text',
+      args: { query: mutationSymbol, isRegex: false },
       reason: 'Inspect direct consumers of the recently changed symbol for a causal link to the verification failure.',
       expectedInformationGain: 'medium',
     });
@@ -165,10 +165,10 @@ export function buildFailureInvestigationBrief(input: FailureInvestigationInput)
 
   if (!options.length) {
     addOption({
-      id: 'collect-workspace-diagnostics',
-      toolName: 'get_diagnostics',
+      id: 'collect-workspace-layout',
+      toolName: 'list_files',
       args: {},
-      reason: 'The failure has no usable source location; collect diagnostics before changing code.',
+      reason: 'The failure has no usable source location; inspect the workspace layout before changing code.',
       expectedInformationGain: 'medium',
     });
   }

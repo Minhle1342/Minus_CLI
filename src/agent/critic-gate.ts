@@ -55,7 +55,7 @@ export interface ExplorationSufficiencyDecision {
 function extractInspectedFilesFromSession(session: Session, turn?: number): Set<string> {
   const inspected = new Set<string>();
   for (const observation of collectCompletionObservations(session, turn)) {
-    if (!['read_file', 'view_file', 'read_compressed_code'].includes(observation.toolName)
+    if (!['read_file'].includes(observation.toolName)
       || isToolResultFailure(observation.payload)) continue;
     const p = observation.args.path || observation.args.filePath || observation.payload.path;
     if (typeof p === 'string' && p.trim()) {
@@ -67,59 +67,6 @@ function extractInspectedFilesFromSession(session: Session, turn?: number): Set<
 
 function extractModifiedFiles(session: Session, filesModified?: string[], turn?: number): Set<string> {
   return new Set([...getTurnCompletionState(session, turn).filesModified, ...(filesModified || [])]);
-}
-
-export interface CallerEvidence {
-  /** True when session holds at least one successful call-graph observation. */
-  checked: boolean;
-  hasCallers: boolean;
-  callerCount: number;
-  sources: string[];
-}
-
-/**
- * Measured upstream-caller evidence from session tool results (single source
- * for the Causal Lineage check). Defensive about result shapes: counts the
- * best available caller signal per tool, skipping failed calls.
- */
-export function extractCallerEvidenceFromSession(session: Session, turn?: number): CallerEvidence {
-  let count = 0;
-  const sources = new Set<string>();
-  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : -1);
-  try {
-    for (const observation of collectCompletionObservations(session, turn)) {
-      const toolName = observation.toolName;
-      const r = observation.payload;
-      if (!r || isToolResultFailure(r)) continue;
-      if (toolName === 'analyze_impact' && num(r.callers) >= 0) {
-        sources.add('analyze_impact');
-        count = Math.max(count, r.callers);
-      } else if (toolName === 'find_references') {
-        // references[] includes the definition itself — exclude it like the
-        // blast-radius engine does; fall back to totalReferences minus one.
-        const refs = Array.isArray(r.references)
-          ? r.references.filter((x: any) => !x?.isDefinition).length
-          : (num(r.totalReferences) > 0 ? num(r.totalReferences) - 1 : 0);
-        sources.add('find_references');
-        count = Math.max(count, Math.max(0, refs));
-      } else if (toolName === 'query_call_graph') {
-        const cg = r.callGraph ?? r;
-        const arr = Array.isArray(cg?.callers) ? cg.callers : (Array.isArray(cg?.nodes) ? cg.nodes : undefined);
-        if (arr) {
-          sources.add('query_call_graph');
-          count = Math.max(count, arr.length);
-        }
-      } else if (toolName === 'get_symbol_context_360') {
-        const arr = Array.isArray(r.callers) ? r.callers : undefined;
-        const n = arr ? arr.length : num(r.callerCount ?? r.totalCallers);
-        if (arr || n >= 0) {
-          sources.add('get_symbol_context_360');
-          count = Math.max(count, arr ? arr.length : n);
-        }
-      }
-    }
-  } catch {}
-  return { checked: sources.size > 0, hasCallers: count > 0, callerCount: count, sources: [...sources] };
 }
 
 export type CriticRiskLevel = 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
@@ -232,9 +179,9 @@ export class CriticGate {
 
     const inspectedFiles = extractInspectedFilesFromSession(session, params.turn);
     const nonScratchInspected = Array.from(inspectedFiles).filter((f) => !isScratchPath(f));
-    const hasStructuralEvidence = collectCompletionObservations(session, params.turn).some((item) =>
-      ['analyze_impact', 'query_call_graph', 'get_symbol_context_360', 'inspect_symbol'].includes(item.toolName)
-      && !isToolResultFailure(item.payload));
+    // Structural/call-graph tools no longer exist in the registry: only
+    // inspected source files count as exploration evidence.
+    const hasStructuralEvidence = false;
     const isLeading = detectLeadingQuery(userRequest).isLeading;
     // Trigger on observable evidence instead of guessing the user's intent: the
     // answer makes code claims, or the turn already inspected/queried code.
@@ -307,7 +254,7 @@ export class CriticGate {
     if (normalizedTarget && !hasInspectedTarget) {
       score -= 50;
       reasons.push(
-        `Target file '${targetFilePath}' has NOT been inspected with read_file/view_file before attempting modification.`,
+        `Target file '${targetFilePath}' has NOT been inspected with read_file before attempting modification.`,
       );
     }
 
@@ -324,34 +271,17 @@ export class CriticGate {
       }
     }
 
-    // 2b. Causal Lineage Check (Bugfix / Security at R2+ Risk), measured instead
-    // of a blind file count: Anti-Confirmation Bias needs upstream caller
-    // context — but a measured single-locus fix (call-graph evidence showing
-    // zero callers) passes without a forced second file read.
+    // 2b. Causal Lineage Check (Bugfix / Security at R2+ Risk). Call-graph tools
+    // are gone, so the only signal left is how many real files were inspected.
     const nonScratchInspected = Array.from(inspectedFiles).filter((f) => !isScratchPath(f));
     const isHighOrMediumRisk = ['R2', 'R3', 'R4', 'R5', 'MEDIUM', 'HIGH', 'CRITICAL'].includes(
       (params.risk || '').trim().toUpperCase(),
     );
-    const callerEvidence = extractCallerEvidenceFromSession(session, params.turn);
-    if (isBugfixOrSecurity && isHighOrMediumRisk && !hasReproduction) {
-      if (nonScratchInspected.length >= 2) {
-        // Inspected chain preserved — no penalty (unchanged behavior).
-      } else if (callerEvidence.checked && !callerEvidence.hasCallers) {
-        reasons.push(
-          `Measured single-locus fix: call-graph evidence (${callerEvidence.sources.join(', ')}) shows no upstream callers; single-file inspection accepted without a forced second read.`,
-        );
-      } else if (callerEvidence.checked && callerEvidence.hasCallers) {
-        score -= 50;
-        reasons.push(
-          `CAUSAL_TRACE_INSUFFICIENT: call-graph evidence shows ${callerEvidence.callerCount} upstream caller(s) (${callerEvidence.sources.join(', ')}) that were not inspected. Inspect the caller/test side before mutating.`,
-        );
-      } else {
-        // Advisory only — no score deduction: the model is told to run one
-        // cheap call-graph check instead of being forced into a second read.
-        reasons.push(
-          `CAUSAL_TRACE_UNVERIFIED: no call-graph evidence in session — run analyze_impact, find_references, or query_call_graph (one cheap call) instead of a forced second file read. Single-file inspection accepted for now; confirm upstream impact before mutating high-risk code.`,
-        );
-      }
+    if (isBugfixOrSecurity && isHighOrMediumRisk && !hasReproduction && nonScratchInspected.length < 2) {
+      // Advisory only — no score deduction.
+      reasons.push(
+        `CAUSAL_TRACE_UNVERIFIED: only ${nonScratchInspected.length} non-scratch file(s) inspected — check callers with search_text or reproduce with run_command instead of guessing. Single-file inspection accepted for now; confirm upstream impact before mutating high-risk code.`,
+      );
     }
 
     // 3. Hypothesis Falsification Invariant: Cannot mutate based on a falsified hypothesis
@@ -391,10 +321,10 @@ export class CriticGate {
         `The independent Verifier determined that exploration information is INSUFFICIENT to begin implementation:`,
         ...reasons.map((r) => `  ❌ ${r}`),
         `\n👉 REQUIRED REMEDIATION ACTIONS:`,
-        `1. Inspect the target file (${targetFilePath}) with read_file/view_file to understand existing logic and exact line numbers.`,
+        `1. Inspect the target file (${targetFilePath}) with read_file to understand existing logic and exact line numbers.`,
         `2. For bugfixes, write a reproduction script (e.g. scratch/reproduce_issue.py) or execute a test command to establish reproduction proof.`,
         `3. Formulate and verify the causal hypothesis before applying mutations.`,
-        `4. Trace the causal lineage: run analyze_impact (one cheap call) or inspect upstream callers, related tests, or config files with read_file/inspect_symbol to avoid tunnel vision.`,
+        `4. Trace the causal lineage: inspect upstream callers, related tests, or config files with search_text/read_file, or run analysis/test commands via run_command to avoid tunnel vision.`,
       ].join('\n');
 
       remediationHint = reasons.join('; ');

@@ -618,8 +618,8 @@ export class ErrorDetective {
             `1. Function signature was refactored or called with obsolete argument shape.`,
             `2. Typechecker/runtime rejects invocation.`,
           ],
-          immediateFix: `Use "inspect_symbol" to inspect target function signature and update callsite arguments in ${file}.`,
-          prevention: `Verify all callers with "find_references" when modifying function signatures.`,
+          immediateFix: `Use "read_file" to inspect the target function signature and update callsite arguments in ${file}.`,
+          prevention: `Verify all callers with "search_text" when modifying function signatures.`,
         };
 
       case 'ASSERTION_FAILURE': {

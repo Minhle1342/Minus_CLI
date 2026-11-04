@@ -26,8 +26,7 @@ test('failure investigation ranks the reported source location before broad expl
   assert.equal(brief.mode, 'soft');
   assert.equal(brief.options[0]?.toolName, 'read_file');
   assert.deepEqual(brief.options[0]?.args, { path: 'src/parser.ts', startLine: 32, endLine: 57 });
-  assert.ok(brief.options.some((option) => option.toolName === 'get_diagnostics'));
-  assert.ok(brief.options.some((option) => option.toolName === 'query_call_graph'));
+  assert.ok(brief.options.some((option) => option.toolName === 'search_text'));
   assert.match(brief.prompt, /direct bounded repair is still allowed/i);
 });
 
@@ -38,10 +37,10 @@ test('failure investigation falls back to a soft workspace diagnostic when no lo
   });
 
   assert.deepEqual(brief.options, [{
-    id: 'collect-workspace-diagnostics',
-    toolName: 'get_diagnostics',
+    id: 'collect-workspace-layout',
+    toolName: 'list_files',
     args: {},
-    reason: 'The failure has no usable source location; collect diagnostics before changing code.',
+    reason: 'The failure has no usable source location; inspect the workspace layout before changing code.',
     expectedInformationGain: 'medium',
   }]);
 });
