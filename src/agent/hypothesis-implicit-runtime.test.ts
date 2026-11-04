@@ -38,10 +38,10 @@ Falsification: node --test test/cache.test.js
 test('isTestFailureRelatedToCurrentTurn classifies failures accurately', () => {
   const modified = new Set(['src/agent/agent-loop.ts']);
 
-  // Case 1: Empty modified files -> unrelated (false)
+  // Case 1: Empty modified files -> unrelated
   assert.equal(
     isTestFailureRelatedToCurrentTurn(new Set(), { stderr: 'Error in agent-loop.ts' }),
-    false,
+    'unrelated',
   );
 
   // Case 2: Output mentions modified file -> related (true)
@@ -50,17 +50,35 @@ test('isTestFailureRelatedToCurrentTurn classifies failures accurately', () => {
       stdout: 'FAIL src/agent/agent-loop.ts:42:15 - syntax error',
       exitCode: 1,
     }),
-    true,
+    'related',
   );
 
-  // Case 3: Output mentions unrelated file -> unrelated (false)
+  // Case 3: Output mentions unrelated file -> unrelated
   assert.equal(
     isTestFailureRelatedToCurrentTurn(modified, {
       stdout: 'FAIL test/unrelated-module.test.ts:10 - expected 1 to be 2',
       stderr: 'Error: Assert failed in test/unrelated-module.test.ts',
       exitCode: 1,
     }),
-    false,
+    'unrelated',
+  );
+
+  // Case 3b: only a test-file name matches -> ambiguous, never a rollback trigger
+  assert.equal(
+    isTestFailureRelatedToCurrentTurn(modified, {
+      stdout: 'FAIL test/agent-loop.test.ts:10 - expected 1 to be 2',
+      exitCode: 1,
+    }),
+    'ambiguous',
+  );
+
+  // Case 3c: same filename in another package -> ambiguous (random name collision)
+  assert.equal(
+    isTestFailureRelatedToCurrentTurn(new Set(['src/a/auth.ts']), {
+      stdout: 'FAIL src/b/auth.ts:10 - expected 1 to be 2',
+      exitCode: 1,
+    }),
+    'ambiguous',
   );
 
   // Case 4: regressionEvidence explicit flags
@@ -70,7 +88,7 @@ test('isTestFailureRelatedToCurrentTurn classifies failures accurately', () => {
       { stdout: 'Some error' },
       { classification: 'pre_existing_out_of_scope' },
     ),
-    false,
+    'unrelated',
   );
 
   assert.equal(
@@ -79,7 +97,7 @@ test('isTestFailureRelatedToCurrentTurn classifies failures accurately', () => {
       { stdout: 'Some error' },
       { classification: 'new_failures_detected' },
     ),
-    true,
+    'related',
   );
 });
 

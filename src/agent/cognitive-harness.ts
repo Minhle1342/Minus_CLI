@@ -507,7 +507,7 @@ export class CognitiveHarness {
           executionTopology: [
             'Step 1 (Architectural Inspection): Inspect relevant files and references using read-only tools (read_file, list_files, search_text).',
             'Step 2 (Scope & Dependency Mapping): Identify exact file boundaries, caller impact, and technical constraints.',
-            'Step 3 (Plan Formalization): Use create_plan to define ordered, atomic subtasks with concrete acceptance criteria.',
+            'Step 3 (Plan Formalization): Outline ordered, atomic subtasks with concrete verification criteria directly in markdown.',
             'Step 4 (Phase Transition Readiness): Once plan is accepted and locked, transition to explore or implement phase.',
           ],
           actionBoundary: 'Strictly READ-ONLY and PLANNING actions (read_file, list_files, search_text). Code editing tools are FORBIDDEN.',

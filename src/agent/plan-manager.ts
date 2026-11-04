@@ -95,7 +95,6 @@ export interface StepPlanPromptOptions {
 const TERMINAL_STATUSES = new Set<TaskStatus>(['COMPLETED', 'FAILED', 'SKIPPED']);
 const VALID_STATUSES = new Set<TaskStatus>(['PENDING', 'IN_PROGRESS', 'COMPLETED', 'FAILED', 'SKIPPED']);
 const PLAN_TOOL_NAMES = new Set(['create_plan', 'update_plan_task']);
-const CODE_CHANGE_PATTERN = /\b(implement|implementation|refactor|fix|upgrade|migrate|migration|add\s+(?:a\s+)?feature|modify\s+code|change\s+code|update\s+code)\b|chỉnh\s+sửa\s+code|sửa\s+code|sửa\s+lỗi|khắc\s+phục|triển\s+khai|tái\s+cấu\s+trúc|thêm\s+tính\s+năng|nâng\s+cấp|cập\s+nhật\s+code/iu;
 const VERIFICATION_PATTERN = /\b(test|tests|testing|verify|verification|validate|build|compile|lint)\b|kiểm\s+thử|kiểm\s+chứng|xác\s+minh|biên\s+dịch/iu;
 
 function cloneTask(task: PlanTask): PlanTask {

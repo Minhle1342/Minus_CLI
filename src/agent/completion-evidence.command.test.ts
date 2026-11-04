@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { CompletionEvidenceGate, classifyToolEvidence, isVerificationCommand } from './completion-evidence.js';
+import { CompletionEvidenceGate, classifyToolEvidence, isVerificationCommand, verificationCommandFor } from './completion-evidence.js';
 import { Session } from '../session/session.js';
 import { Workspace } from '../workspace/workspace.js';
 
@@ -44,6 +44,28 @@ test('verification classifier rejects wrappers and commands that can mask test f
 test('simple successful && verification chains remain valid', () => {
   assert.equal(isVerificationCommand('npm run build && npm test'), true);
   assert.equal(isVerificationCommand('npm test && echo completed'), true);
+});
+
+test('verification classifier recognizes bare runners and test shell scripts', () => {
+  for (const command of ['jest', 'vitest run', 'mocha', 'deno test', 'bash scripts/run-tests.sh', './gradlew build']) {
+    assert.equal(isVerificationCommand(command), true, command);
+  }
+  for (const command of ['jest --version', 'bash scripts/deploy.sh', 'node app.js']) {
+    assert.equal(isVerificationCommand(command), false, command);
+  }
+});
+
+test('verificationCommandFor unifies run_command and run_test_suite channels', () => {
+  assert.equal(verificationCommandFor('run_command', { command: 'npm test' }, { exitCode: 1 }), 'npm test');
+  assert.equal(verificationCommandFor('run_command', { command: 'npm test' }, {}), undefined);
+  assert.equal(verificationCommandFor('run_command', { command: 'node app.js' }, { exitCode: 1 }), undefined);
+  assert.equal(
+    verificationCommandFor('run_test_suite', { command: 'npm test' }, { commandExecuted: 'npm test', exitCode: 1 }),
+    'npm test',
+  );
+  assert.equal(verificationCommandFor('run_test_suite', { useScratchWorkspace: true }, { exitCode: 1 }), undefined);
+  assert.equal(verificationCommandFor('run_test_suite', {}, { errorCode: 'spawn_failed' }), undefined);
+  assert.equal(verificationCommandFor('read_file', {}, {}), undefined);
 });
 
 test('completed background verification contributes evidence only after terminal success', () => {

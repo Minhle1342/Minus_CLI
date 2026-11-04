@@ -45,6 +45,17 @@ export interface TransitionRule {
   secondaryBoost: number;
 }
 
+const TOOL_CANONICAL_MAP: Record<string, string> = {
+  search_codebase_fast: 'search_text',
+  tools_search: 'search_text',
+  create_file: 'write_file',
+  write_to_file: 'write_file',
+  replace_file_content: 'replace_text',
+  multi_replace_file_content: 'replace_text',
+  search_web: 'web_search',
+  read_url_content: 'web_fetch',
+};
+
 const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
   IDLE: {
     primarySuccessors: ['search_text', 'read_file'],
@@ -53,7 +64,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.08,
   },
   PHASE_TRANSITION_ACCEPTED: {
-    primarySuccessors: ['create_file', 'write_file', 'replace_text'],
+    primarySuccessors: ['write_file', 'replace_text'],
     secondarySuccessors: ['read_file', 'run_command'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
@@ -71,7 +82,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.10,
   },
   PASSED_TEST: {
-    primarySuccessors: [],
+    primarySuccessors: ['run_command'],
     secondarySuccessors: ['read_file'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
@@ -83,7 +94,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.12,
   },
   HYPOTHESIS_VALIDATED: {
-    primarySuccessors: ['create_file', 'replace_text', 'write_file'],
+    primarySuccessors: ['write_file', 'replace_text'],
     secondarySuccessors: ['run_command'],
     primaryBoost: 0.35,
     secondaryBoost: 0.15,
@@ -107,7 +118,7 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.15,
   },
   WEB_CONTENT_ACQUIRED: {
-    primarySuccessors: ['read_file', 'replace_text', 'create_file'],
+    primarySuccessors: ['read_file', 'replace_text', 'write_file'],
     secondarySuccessors: ['run_command'],
     primaryBoost: 0.28,
     secondaryBoost: 0.12,
@@ -149,8 +160,8 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.10,
   },
   SYMBOL_INSPECTED: {
-    primarySuccessors: [],
-    secondarySuccessors: ['replace_text', 'read_file'],
+    primarySuccessors: ['read_file'],
+    secondarySuccessors: ['replace_text'],
     primaryBoost: 0.25,
     secondaryBoost: 0.12,
   },
@@ -197,8 +208,8 @@ const TRANSITION_TABLE: Record<ToolOutcomeState, TransitionRule> = {
     secondaryBoost: 0.12,
   },
   OCC_CONFLICT: {
-    primarySuccessors: [],
-    secondarySuccessors: [],
+    primarySuccessors: ['read_file'],
+    secondarySuccessors: ['run_command'],
     primaryBoost: 0.30,
     secondaryBoost: 0.15,
   },
@@ -369,11 +380,15 @@ export class ToolTransitionGraph {
     const rule = TRANSITION_TABLE[outcome];
     if (!rule) return 0;
 
-    const canonical = candidateToolName === 'search_codebase_fast' ? 'search_text' : candidateToolName;
-    if (rule.primarySuccessors.includes(candidateToolName) || rule.primarySuccessors.includes(canonical)) {
+    const canonical = TOOL_CANONICAL_MAP[candidateToolName] || candidateToolName;
+    const matches = (tool: string) => {
+      const toolCanon = TOOL_CANONICAL_MAP[tool] || tool;
+      return tool === candidateToolName || tool === canonical || toolCanon === canonical || toolCanon === candidateToolName;
+    };
+    if (rule.primarySuccessors.some(matches)) {
       return rule.primaryBoost;
     }
-    if (rule.secondarySuccessors.includes(candidateToolName) || rule.secondarySuccessors.includes(canonical)) {
+    if (rule.secondarySuccessors.some(matches)) {
       return rule.secondaryBoost;
     }
     return 0;

@@ -440,13 +440,13 @@ export class ReflectionEngine {
         `Error details: ${result.error}`,
         result.hint ? `💡 Hint: ${result.hint}` : '',
         `👉 ADJUSTMENT RULES:`,
-        `1. If no plan exists: Call "create_plan" first with a tasks array (e.g. [{ title: "Inspect files" }, { title: "Implement code" }, { title: "Verify" }]).`,
+        `1. If no plan exists: Outline steps directly in your markdown response.`,
         `2. If this is a simple task: Do not call "update_plan_task"; execute tools directly or answer immediately.`,
         `3. If evidence is required: Call the corresponding inspection/mutation/verification tool first before marking COMPLETED.`,
         `4. DO NOT call update_plan_task with the same invalid parameters again!`,
       ].filter(Boolean).join('\n');
 
-      advice = `update_plan_task failed (${result.errorCode || 'error'}). Create plan first via create_plan or execute directly.`;
+      advice = `Do not call phantom plan tools. Inspect files and execute tools directly or outline steps in markdown.`;
     }
     // 6. Phân tích lỗi chung khác
     else if (result.error || result.errorCode) {

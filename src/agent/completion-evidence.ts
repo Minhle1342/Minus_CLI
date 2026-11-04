@@ -56,11 +56,19 @@ function isVerificationSegment(command: string): boolean {
   if (/^(?:npm|pnpm|yarn|bun)\s+test\b/i.test(normalized)) return true;
   if (/^(?:npm|pnpm|yarn|bun)\s+exec\s+(?:--\s+)?(?:vitest|jest|mocha|ava|playwright|cypress|tsc|eslint)\b/i.test(normalized)) return true;
   if (/^npx\s+(?:--yes\s+)?(?:playwright\s+test|cypress\s+run|vitest|jest|mocha|ava|tsc|eslint)\b/i.test(normalized)) return true;
+  // Bare runner invocation runs the suite (only info flags are excluded).
+  // shortcut: any other non-running flag (e.g. jest --listTests) still counts, upgrade if it causes false verification evidence.
+  if (/^(?:vitest|jest|mocha|ava)\b(?!\s+--(?:version|help)\b)/i.test(normalized)) return true;
   if (/^(?:vitest|jest|mocha|ava|playwright)\s+(?:run|test)\b/i.test(normalized)) return true;
-  if (/^(?:cargo\s+test\b|cargo\s+nextest\s+run\b|go\s+test\b|dotnet\s+(?:test|build)\b|mvn\s+(?:test|verify)\b|gradle\s+(?:test|check)\b|\.?\/?gradlew(?:\.bat)?\s+(?:test|check)\b|ctest\b|make\s+(?:test|check)\b|composer\s+test\b|bundle\s+exec\s+rspec\b|phpunit\b|pytest\b|py\.test\b|tsc(?:\s|$))/i.test(normalized)) return true;
+  if (/^(?:cargo\s+test\b|cargo\s+nextest\s+run\b|go\s+test\b|deno\s+test\b|dotnet\s+(?:test|build)\b|mvn\s+(?:test|verify)\b|gradle\s+(?:test|check)\b|\.?\/?gradlew(?:\.bat)?\s+(?:test|check|build)\b|ctest\b|make\s+(?:test|check)\b|composer\s+test\b|bundle\s+exec\s+rspec\b|phpunit\b|pytest\b|py\.test\b|tsc(?:\s|$))/i.test(normalized)) return true;
   if (/^python(?:3)?(?:\.exe)?\s+(?:-m\s+(?:unittest|pytest)\b|(?:[^\s]*[\\/])*(?:test_[^\s]+\.py|[^\s]+_test\.py|tests?\.py)\b)/i.test(normalized)) return true;
   if (/^python(?:3)?(?:\.exe)?\s+-m\s+(?:py_compile|compileall)\b/i.test(normalized)) return true;
   if (/^(?:node|tsx|npx\s+tsx|npx\s+ts-node)\s+(?:--test\b|(?:--[a-z0-9_-]+\s+)*(?:test|tests)[\\/]|(?:[^\s]*[\\/])*(?:test|tests)\.[cm]?[jt]sx?\b)/i.test(normalized)) return true;
+  const shellScript = normalized.match(/^(?:bash|sh|zsh|pwsh|powershell)(?:\.exe)?\s+(?:-\S+\s+)*["']?([^\s"']+)["']?/i);
+  if (shellScript) {
+    const base = (shellScript[1].replace(/\\/g, '/').split('/').pop() || '').replace(/\.[^.]+$/, '');
+    return VERIFY_SCRIPT_NAME.test(base);
+  }
   return false;
 }
 
@@ -81,6 +89,27 @@ export function isVerificationCommand(command: unknown): boolean {
   // and `||` can hide a failed test behind a later successful process.
   if (analysis.operators.some((operator) => operator !== '&&')) return false;
   return analysis.segments.some(isVerificationSegment);
+}
+
+/**
+ * Command string to attribute a verification failure to, for every channel that
+ * can run a verification suite. Returns undefined when this call ran no verification.
+ */
+export function verificationCommandFor(
+  toolName: string,
+  args: Record<string, any> = {},
+  result: Record<string, any> = {},
+): string | undefined {
+  if (toolName === 'run_command') {
+    const command = extractCommandString(args, result);
+    // exitCode proves the process actually ran; blocked/preflight results have none.
+    return isVerificationCommand(command) && typeof result.exitCode === 'number' ? command : undefined;
+  }
+  if (toolName === 'run_test_suite' && !args.useScratchWorkspace
+    && typeof result.exitCode === 'number' && !result.errorCode) {
+    return String(result.commandExecuted || args.command || 'run_test_suite');
+  }
+  return undefined;
 }
 
 export function isScratchCommand(command: unknown): boolean {

@@ -40,7 +40,7 @@ import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, col
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
-import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile } from './completion-evidence.js';
+import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile, verificationCommandFor } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath, isCommentOnlyChange } from '../skills/verification-policy.js';
 import { shouldPersistReasoning } from './reasoning-persistence.js';
 import { type LLMRequestOptions } from '../llm/gemini.js';
@@ -140,34 +140,47 @@ export function extractHypothesisFromReasoning(text?: string | null): { statemen
   return undefined;
 }
 
+export type FailureAttribution = 'related' | 'unrelated' | 'ambiguous';
+
+/**
+ * Which code owns a failing verification. Only an exact modified-path match or an
+ * explicit regression report justifies a rollback; a bare filename match is
+ * ambiguous because unrelated packages routinely reuse names.
+ */
 export function isTestFailureRelatedToCurrentTurn(
   modifiedFiles: Set<string> | string[],
   result: Record<string, any>,
   regressionEvidence?: any,
-): boolean {
+): FailureAttribution {
   const modifiedList = Array.from(modifiedFiles).map((f) => f.replace(/\\/g, '/').toLowerCase());
-  if (modifiedList.length === 0) return false;
+  if (modifiedList.length === 0) return 'unrelated';
 
   if (regressionEvidence) {
-    if (regressionEvidence.classification === 'pre_existing_out_of_scope') return false;
-    if (regressionEvidence.classification === 'new_failures_detected') return true;
+    if (regressionEvidence.classification === 'pre_existing_out_of_scope') return 'unrelated';
+    if (regressionEvidence.classification === 'new_failures_detected') return 'related';
   }
 
   const raw = `${result.stdout || ''}\n${result.stderr || ''}\n${result.error || ''}\n${result.diagnostic || ''}`;
   const normalizedOutput = raw.replace(/\\/g, '/').toLowerCase();
-  if (!normalizedOutput.trim()) return false;
+  if (!normalizedOutput.trim()) return 'unrelated';
 
   const genericNames = new Set(['index.ts', 'index.js', 'types.ts', 'types.js', 'utils.ts', 'utils.js', 'main.ts', 'main.js']);
+  let nameOnlyMatch = false;
 
   for (const file of modifiedList) {
-    if (normalizedOutput.includes(file)) return true;
+    if (normalizedOutput.includes(file)) return 'related';
     const base = path.posix.basename(file);
-    if (!genericNames.has(base) && base.length >= 4 && normalizedOutput.includes(base)) {
-      return true;
-    }
+    if (genericNames.has(base) || base.length < 4) continue;
+    const baseNoExt = base.replace(/\.[^/.]+$/, '');
+    const testCounterpart = baseNoExt.length >= 4 && (
+      normalizedOutput.includes(baseNoExt + '.test')
+      || normalizedOutput.includes(baseNoExt + '.spec')
+      || normalizedOutput.includes(baseNoExt + '_test')
+    );
+    if (normalizedOutput.includes(base) || testCounterpart) nameOnlyMatch = true;
   }
 
-  return false;
+  return nameOnlyMatch ? 'ambiguous' : 'unrelated';
 }
 
 export function scopedMutationTargets(toolName: string, args: Record<string, any>): string[] {
@@ -2048,18 +2061,6 @@ export class AgentLoop {
         }
 
         const consecutiveFails = this.reflectionEngine.getConsecutiveFailures();
-        const activeScaffold = this.cognitiveHarness.createScaffold({
-          request: turnUserRequest,
-          phase: classification.phase,
-          activeTask: activeTask?.title,
-          consecutiveFailures: consecutiveFails,
-          hasAttachments: hasAttachmentAnchors,
-          anchorPaths: attachmentAnchors,
-        });
-        const compactScaffoldPrompt = this.cognitiveHarness.formatScaffoldForCompactPrompt(activeScaffold);
-        const legacyScaffoldPrompt = step === 1 || consecutiveFails > 1
-          ? compactScaffoldPrompt
-          : '';
         const legacyPlanContext = this.planManager.renderExecutionContext();
         const planRequirements = this.planManager.getRequirements();
         const isStepPlanOrReadOnly = classification.phase === 'plan' || this.kernel?.ctx?.permissions?.getMode?.() === 'read_only';
@@ -2168,9 +2169,6 @@ export class AgentLoop {
             },
           },
         });
-        if (promptDecision.scaffoldPrompt && !this._collapsePreferences.compactSteps) {
-          CLI.renderCognitiveScaffold(this.cognitiveHarness.formatScaffoldForUI(activeScaffold));
-        }
 
         let response;
         // Keep the static prefix cacheable. Enforced step playbooks are selected below and
@@ -2193,7 +2191,6 @@ export class AgentLoop {
         const assembledSystemPrompt = systemPromptEnvelope.prompt;
         const rawPlanContext = promptDecision.planContext;
         const advicePrompt = promptDecision.advicePrompt;
-        const cognitiveScaffoldText = promptDecision.scaffoldPrompt;
         // Intent-Gated Memory Retrieval:
         // Tự động phân bổ ngân sách token dựa theo phân loại tác vụ (Classification Phase & Complexity):
         // - Phase 'implement' / 'verify' hoặc complexity 'trivial' / 'small' -> Tác vụ cục bộ:
@@ -4468,25 +4465,26 @@ export class AgentLoop {
               }
             }
 
-            if (toolName === 'run_command' && isVerificationCommand(commandForAttribution) && this.targetFilesModifiedInTurn.size > 0) {
+            const verificationRun = verificationCommandFor(toolName, toolArgs, executionResult.result);
+            if (verificationRun && this.targetFilesModifiedInTurn.size > 0) {
               this.hypothesisTracker.markTesting();
               const isVerifOk = !isToolResultFailure(executionResult.result) && executionResult.result?.exitCode === 0;
               const activeH = this.hypothesisTracker.getActiveHypothesis();
 
               if (isVerifOk) {
                 if (activeH) {
-                  this.hypothesisTracker.markValidated(activeH.id, `Verified with ${commandForAttribution}`);
+                  this.hypothesisTracker.markValidated(activeH.id, `Verified with ${verificationRun}`);
                 }
               } else {
-                const isRelated = isTestFailureRelatedToCurrentTurn(
+                const attribution = isTestFailureRelatedToCurrentTurn(
                   this.targetFilesModifiedInTurn,
                   executionResult.result,
                   executionResult.result?.regressionEvidence,
                 );
 
-                if (isRelated) {
+                if (attribution === 'related') {
                   if (activeH) {
-                    this.hypothesisTracker.markFalsified(activeH.id, `Verification command "${commandForAttribution}" failed on modified code`);
+                    this.hypothesisTracker.markFalsified(activeH.id, `Verification command "${verificationRun}" failed on modified code`);
                   }
                   const hId = activeH?.id || 'H';
                   const rollbackOutcome = await this.rollbackOrchestrator.rollbackOnFalsifiedHypothesis(
@@ -4512,10 +4510,11 @@ export class AgentLoop {
                     } catch { }
                   }
                 } else {
-                  if (activeH) {
-                    this.hypothesisTracker.markSupported(activeH.id, `Verification command "${commandForAttribution}" failed on unrelated code`);
-                  }
-                  const unrelatedNotice = `⚠️ [UNRELATED TEST FAILURE]: Verification command "${commandForAttribution}" failed, but the failure is unrelated to code modified in this turn (${Array.from(this.targetFilesModifiedInTurn).join(', ') || 'none'}). Workspace was NOT rolled back. You MUST explicitly notify the user about this unrelated failure in your final answer.`;
+                  // Failed verification on unrelated or unconfirmable code: do NOT mark supported (it was not verified).
+                  const filesLabel = Array.from(this.targetFilesModifiedInTurn).join(', ') || 'none';
+                  const unrelatedNotice = attribution === 'ambiguous'
+                    ? `⚠️ [UNCONFIRMED TEST FAILURE]: Verification command "${verificationRun}" failed, but the failure could not be attributed to code modified in this turn (${filesLabel}) — i.e. only a filename matched, which can be an unrelated package. Workspace was NOT rolled back. You MUST explicitly notify the user about this unconfirmed failure in your final answer.`
+                    : `⚠️ [UNRELATED TEST FAILURE]: Verification command "${verificationRun}" failed, but the failure is unrelated to code modified in this turn (${filesLabel}). Workspace was NOT rolled back. You MUST explicitly notify the user about this unrelated failure in your final answer.`;
                   if (executionResult.result && typeof executionResult.result === 'object') {
                     try {
                       if (Object.isExtensible(executionResult.result)) {

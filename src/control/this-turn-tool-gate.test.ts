@@ -373,7 +373,7 @@ test('CognitiveHarness synchronizes scaffolding instructions strictly by phase t
   assert.ok(planScaffold.negativeGate.some(g => g.includes('replace_text')));
   // Topology must NOT guide LLM to call replace_text / apply_patch during PLAN phase
   assert.equal(planScaffold.executionTopology.some(s => s.includes('replace_text')), false);
-  assert.ok(planScaffold.executionTopology.some(s => s.includes('create_plan')));
+  assert.ok(planScaffold.executionTopology.some(s => s.includes('Plan Formalization')));
   assert.ok(planScaffold.actionBoundary.includes('FORBIDDEN'));
 
   const planPrompt = harness.formatScaffoldForPrompt(planScaffold);
