@@ -427,6 +427,14 @@ test('ctrl+d on the only remaining tab deletes it and auto-spawns a new tab', ()
   assert.notEqual(m.sessions.activeId, 'solo-1');
   assert.ok(cmds.some((c) => c.type === 'session-delete' && c.sessionId === 'solo-1'));
   assert.ok(cmds.some((c) => c.type === 'session-new'));
+  const newIdx = cmds.findIndex((c) => c.type === 'session-new');
+  const delIdx = cmds.findIndex((c) => c.type === 'session-delete');
+  assert.ok(newIdx < delIdx, 'session-new phải chạy trước session-delete để kernel không auto-create duplicate session');
+
+  const newId = m.sessions.activeId;
+  [m] = update(meta({ sessions: ['New Tab'], sessionIds: [newId], session: 'New Tab', activeSessionId: newId }), m);
+  assert.equal(m.sessions.tabs.length, 1, 'Không bị duplicate tab sau khi metadata kernel xác nhận');
+  assert.equal(m.sessions.activeId, newId);
 });
 
 test('ctrl+d on middle tab deletes it and switches to adjacent next tab', () => {

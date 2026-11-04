@@ -1300,8 +1300,8 @@ export function deleteTab(model: RootModel, index: number): [RootModel, Cmd[]] {
     const id = `session-${Date.now().toString(36)}${newTabSeq.toString(36).padStart(3, '0')}${Math.floor(Math.random() * 36).toString(36)}`;
     const next: SessionTab[] = [{ id, title: shortTabTitle(id), historyKnown: true, lastActive: Date.now() }];
     const cmds: Cmd[] = [];
-    if (!target.subagent) cmds.push({ type: 'session-delete', sessionId: target.id });
     cmds.push({ type: 'session-new', sessionId: id });
+    if (!target.subagent) cmds.push({ type: 'session-delete', sessionId: target.id });
     return [{
       ...model,
       focus: 'composer' as const,
