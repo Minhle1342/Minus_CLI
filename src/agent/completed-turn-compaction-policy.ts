@@ -88,9 +88,14 @@ export function hasMaterialCompletedTurnSavings(
   originalTokens: number,
   compactedTokens: number,
   policy: CompletedTurnCompactionPolicy,
+  historyTokens?: number,
 ): boolean {
   const saved = originalTokens - compactedTokens;
+  const ratioBase = typeof historyTokens === 'number' && Number.isFinite(historyTokens) && historyTokens > 0
+    ? Math.min(originalTokens, historyTokens)
+    : originalTokens;
   return Number.isFinite(originalTokens) && originalTokens > 0
     && Number.isFinite(compactedTokens) && compactedTokens >= 0
-    && saved >= policy.minTokensSaved && saved / originalTokens >= policy.minSavingsRatio;
+    && saved >= policy.minTokensSaved
+    && (saved / originalTokens >= policy.minSavingsRatio || saved / ratioBase >= policy.minSavingsRatio);
 }

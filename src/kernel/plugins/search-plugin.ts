@@ -43,7 +43,7 @@ HOW TO USE RESULTS:
 - Use selector in web_fetch ("main", "article", "markdown-body") to isolate core text and strip navigation/sidebars to minimize tokens.
 - Use web_fetch with extract_mode: "code_blocks" when only implementation examples are needed to save context tokens.
 - Set github_auth: "gcm" on GitHub URLs when encountering HTTP 403/429 rate limits, private repos, or internal PRs/issues to use host credentials safely.
-- Apply findings via apply_patch and empirically verify results with run_command test suites.
+- Apply findings with replace_text or write_file and empirically verify results with run_command test suites.
 
 DIG DEEPER THAN SNIPPETS:
 - Never answer from titles/snippets alone when facts, versions, API signatures, or code are needed: fetch the top 1-2 investigation leads with web_fetch and cite the fetched pages, not the search result.

@@ -62,7 +62,9 @@ export function loadSession(workspaceDirOrPath?: string): SessionData {
       }
     }
   } catch (error) {
-    // Không ném lỗi để tránh ngắt quá trình khởi động
+    // Không ném lỗi để tránh ngắt quá trình khởi động, nhưng phải nói ra: nuốt
+    // lỗi ở đây từng làm mất model/token config mà không ai biết.
+    console.error('Failed to load session config, starting fresh:', error);
   }
   return {};
 }
@@ -72,6 +74,7 @@ export function loadSession(workspaceDirOrPath?: string): SessionData {
  */
 export function saveSession(data: Partial<SessionData>, workspaceDirOrPath?: string): void {
   const filePath = getSessionFilePath(workspaceDirOrPath);
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
   try {
     const current = loadSession(filePath);
     const updated: SessionData = {
@@ -83,8 +86,11 @@ export function saveSession(data: Partial<SessionData>, workspaceDirOrPath?: str
     if (!fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
     }
-    fs.writeFileSync(filePath, JSON.stringify(updated, null, 2), 'utf-8');
+    // Write-then-rename: a crash can never leave a half-written session.json.
+    fs.writeFileSync(temporaryPath, JSON.stringify(updated, null, 2), 'utf-8');
+    fs.renameSync(temporaryPath, filePath);
   } catch (error) {
+    try { if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath); } catch {}
     console.error('Failed to save session:', error);
   }
 }

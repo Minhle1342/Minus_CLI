@@ -486,7 +486,7 @@ export class CognitiveHarness {
       // 1. Phân hóa scaffold chuyên biệt theo từng Phase để triệt tiêu việc gọi nhầm tool (Tool Gating Alignment)
       if (phase === 'plan') {
         const negativeGate = [
-          '🔒 [PHASE LOCK: PLAN] NEVER attempt code mutations (DO NOT call replace_text, apply_patch, write_file, write_to_file) during the PLAN phase.',
+          '🔒 [PHASE LOCK: PLAN] NEVER attempt code mutations (DO NOT call replace_text or write_file) during the PLAN phase.',
           'NEVER fabricate mock test data inside production code.',
           'NEVER comment out or silence compiler/LSP diagnostics.',
           'NEVER guess or hallucinate test commands or binary output paths without inspecting project manifests or confirming file existence with list_files.',
@@ -614,7 +614,7 @@ export class CognitiveHarness {
           'Phase 1 (Exploration & Localization): Inspect exact target lines, trace call graph dependencies, and identify root cause.',
           'Phase 2 (Reproduction Gating): Write reproduction test (e.g. scratch/reproduce_*.py) and confirm failing execution.',
           'Phase 3 (Dual-Agent Sufficiency): Verify exploration completeness and blast radius closure before unlocking mutations.',
-          'Phase 4 (Surgical Implementation): Apply the minimal atomic change (replace_text / apply_patch).',
+          'Phase 4 (Surgical Implementation): Apply the minimal atomic change (replace_text / write_file).',
           'Phase 5 (Empirical Verification): Re-run reproduction test (must PASS) and full project test suite.',
         ],
         actionBoundary: 'Touch only the specific files necessary for this fix; leave unrelated files untouched.',

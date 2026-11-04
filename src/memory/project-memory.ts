@@ -136,8 +136,14 @@ export class ProjectMemoryManager {
         this.memoryData.lastIndexed = new Date().toISOString();
         await this.save();
       }
-    } catch {
-      // Chưa có file -> Tự động quét và index workspace lần đầu
+    } catch (error: any) {
+      // Chỉ ENOENT nghĩa là "chưa có file". File hỏng/không đọc được phải được
+      // giữ lại trước khi index lại, nếu không save() sẽ ghi đè và mất sạch bộ nhớ.
+      if (error?.code !== 'ENOENT') {
+        const quarantined = `${this.memoryFilePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        await fs.rename(this.memoryFilePath, quarantined);
+        console.warn(`⚠️  Project memory unreadable (${error?.message ?? error}); preserved at ${quarantined} and re-indexed.`);
+      }
       await this.autoIndexWorkspace(workspace ?? new Workspace(this.workspaceDir));
       await this.save();
     }

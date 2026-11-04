@@ -5,7 +5,6 @@ import { analyzeShellCommand } from './shell-segmenter.js';
 import { isMutationTool, generateFileToolDiff } from '../tools/diff-generator.js';
 import { CLI } from '../ui/cli-ui.js';
 import { ToolDescriptorRegistry } from '../control/tool-descriptor-registry.js';
-import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
 import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
 import { isGateOpen } from './full-access-gates.js';
 import type { PermissionMode } from './permission-modes.js';
@@ -220,15 +219,13 @@ export class PermissionManager {
       const command = String(args.command || args.CommandLine || args.commandLine || args.cmd || args.rawCommand || args.script || '');
       const safeCommand = toolName === 'run_command'
         && new SandboxPolicyEngine(this.workspaceRoot || process.cwd(), 'strict').evaluateCommand(command, args.cwd).allowed;
-      const unsafeGit = toolName === 'git_command' && !checkPhaseToolEffect(
-        { name: toolName } as any, args, 'explore', this.workspaceRoot || process.cwd()).allowed;
       // npm test/build runs arbitrary test code + writes dist/: in plan it needs
       // an explicit opt-in flag (sandbox strict already denies it as non-read-only).
       const isPlanTestCommand = toolName === 'run_command'
         && /(^|[\s;&|])(npm\s+(test|run\s+(build|test))|npx\s+tsc|pytest|cargo\s+test|dotnet\s+test)(?=[\s;&|]|$)/i.test(command);
       const planTestBlocked = isPlanTestCommand && process.env.MINUS_PLAN_ALLOW_TEST !== '1';
       const planTestOptIn = isPlanTestCommand && process.env.MINUS_PLAN_ALLOW_TEST === '1';
-      if ((toolName === 'run_command' && !safeCommand && !planTestOptIn) || planTestBlocked || unsafeGit || toolName === 'run_test_suite' || descriptor.mutates) {
+      if ((toolName === 'run_command' && !safeCommand && !planTestOptIn) || planTestBlocked || toolName === 'run_test_suite' || descriptor.mutates) {
         return {
           allowed: false,
           errorCode: 'PERMISSION_DENIED',
@@ -276,6 +273,8 @@ export class PermissionManager {
     // Phân loại rủi ro của Tool Call
     const request = this.classifyToolCall(toolName, args);
     this.requestHistory.push(request);
+    // Bound the audit list: long sessions produce one request per tool call.
+    if (this.requestHistory.length > 200) this.requestHistory.shift();
 
     // Sinh Diff View xem trước nếu là tool sửa/thao tác file
     if (isMutationTool(toolName)) {

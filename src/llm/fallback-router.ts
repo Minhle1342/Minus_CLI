@@ -83,6 +83,9 @@ export class FallbackRouterLLM {
     for (let attempt = 0; attempt < this.tiers.length; attempt++) {
       const currentIndex = (initialIndex + attempt) % this.tiers.length;
       const currentTier = this.tiers[currentIndex];
+      // Once text reached the screen, a retry would print a second answer on
+      // top of the first. Track it so the catch below rethrows instead.
+      let streamedThisAttempt = false;
 
       try {
         const client = currentTier.createClient();
@@ -94,7 +97,15 @@ export class FallbackRouterLLM {
           console.log(`\n${c.yellow}${c.bold}⚡ [AUTO-FALLBACK ACTIVATED]${c.reset} ${c.brightYellow}Switching to Tier ${currentTier.tier}: ${c.bold}${currentTier.name}${c.reset} (${currentTier.provider})...`);
         }
 
-        const response = await client.generateStream(session, tools, callbacks, mergedRequest);
+        const attemptCallbacks: StreamCallbacks | undefined = callbacks
+          ? {
+            ...callbacks,
+            onThoughtToken: (token) => { streamedThisAttempt = true; callbacks.onThoughtToken?.(token); },
+            onContentToken: (token) => { streamedThisAttempt = true; callbacks.onContentToken?.(token); },
+          }
+          : undefined;
+
+        const response = await client.generateStream(session, tools, attemptCallbacks, mergedRequest);
 
         // Thành công -> cập nhật activeIndex
         this.activeIndex = currentIndex;
@@ -107,6 +118,10 @@ export class FallbackRouterLLM {
             finishReason: 'aborted',
             rawFinishReason: 'aborted',
           };
+        }
+        if (streamedThisAttempt) {
+          // Partial answer already shown; failing over would duplicate it.
+          throw err;
         }
         lastError = err;
         const msg = String(err?.message || '');

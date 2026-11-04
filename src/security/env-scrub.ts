@@ -81,8 +81,9 @@ export function collectSecretsFromEnv(env?: Record<string, string>): string[] {
     if (typeof v !== 'string' || v.length < 8) continue;
     if (SECRET_KEY_PATTERN.test(k) && !out.includes(v)) out.push(v);
   }
-  // Longest first so substring replacement doesn't fragment.
-  return out.sort((a, b) => b.length - a.length).slice(0, 20);
+  // Longest first so substring replacement doesn't fragment. Redact all of them:
+  // a hard cap left the shortest real passwords in logs.
+  return out.sort((a, b) => b.length - a.length);
 }
 
 function escapeRegExp(s: string): string {

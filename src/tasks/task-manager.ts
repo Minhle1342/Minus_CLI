@@ -193,7 +193,20 @@ export class TaskManager {
     });
 
     this.tasks.set(id, task);
+    this.pruneFinished();
     return task;
+  }
+
+  /** Keep recent finished tasks for `manage_task logs` but never grow forever. */
+  private pruneFinished(keep = 50): void {
+    if (this.tasks.size <= keep) return;
+    for (const [taskId, task] of this.tasks) {
+      if (this.tasks.size <= keep) break;
+      if (task.status === 'running') continue;
+      this.tasks.delete(taskId);
+      this.watchdogs.delete(taskId);
+      this.inboxes.delete(taskId);
+    }
   }
 
   /** True when an auto-promoted task for this session/turn is still running and its stall notice has not released the gate. */

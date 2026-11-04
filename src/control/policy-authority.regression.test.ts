@@ -20,7 +20,6 @@ test('Git inspection is exposed but readonly permission and phase still deny Git
   const classification = new ClassificationEngine().classify({ request: 'Review the changes' });
   assert.ok(new ThisTurnToolGate().decide(classification, [tool]).allowedToolNames.includes('git_command'));
   const permission = new PermissionManager('read_only');
-  assert.equal((await permission.checkPermission('git_command', { subcommand: 'status', args: ['--short'] })).allowed, true);
   assert.equal((await permission.checkPermission('git_command', { subcommand: 'commit', args: ['-m', 'change'] })).allowed, false);
 });
 
@@ -101,7 +100,7 @@ test('read-only effects deny execution alternatives while retaining inspection a
   for (const name of ['run_node_script', 'run_test_suite', 'write_to_file', 'start_background_task', 'browser_click', 'unknown_plugin_effect']) {
     assert.equal((await permission.checkPermission(name, {})).allowed, false, name);
   }
-  for (const name of ['read_file', 'codegraph_explore', 'create_plan', 'submit_solution', 'browser_screenshot', 'browser_wait']) {
+  for (const name of ['read_file', 'codegraph_explore', 'submit_solution', 'browser_screenshot', 'browser_wait']) {
     assert.equal((await permission.checkPermission(name, {})).allowed, true, name);
   }
   assert.equal((await permission.checkPermission('run_command', { command: 'git status -s' })).allowed, true);

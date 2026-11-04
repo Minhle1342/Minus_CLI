@@ -468,6 +468,14 @@ export class ContextBudgetManager {
     this.historyGrowthEwma = 0;
   }
 
+  /** Update hysteresis baseline after a completed-turn compaction pass. */
+  updatePostTurnCompaction(afterUpperBoundTokens?: number, afterHistoryTokens?: number): void {
+    this.clearRejectedCandidates();
+    this.lastCompactionAfterUpperBound = afterUpperBoundTokens;
+    this.lastHistoryTokens = afterHistoryTokens;
+    this.historyGrowthEwma = 0;
+  }
+
   async prepareRequest(
     envelope: ModelRequestEnvelope,
     options: ContextPrepareOptions = {},
@@ -613,6 +621,9 @@ export class ContextBudgetManager {
         after: before,
         checkpointObservations,
         withinBudget: before.upperBoundTokens <= usableInputTokens,
+        triggerReasons,
+        projectedGrowthTokens,
+        nonHistoryPressure,
       };
     }
     const candidateAfter =
@@ -626,7 +637,7 @@ export class ContextBudgetManager {
     // Emergency Deep Compaction: Nếu vẫn vượt ngân sách cấu hình và có nhiều hơn 2 tin nhắn,
     // tự động ép sâu hơn (chỉ giữ 2 turn gần nhất và mask toàn bộ kết quả tool cũ) trước khi báo lỗi.
     if (!withinBudget && ((!options.protectActiveTurn && envelope.history.length > 2)
-      || (useEnforce && options.protectActiveTurn && recoveryWindow))) {
+      || (options.protectActiveTurn && recoveryWindow))) {
       const emergencyBudgetTokens = Math.max(
         1,
         usableInputTokens - before.nonHistoryTokens,
@@ -641,7 +652,7 @@ export class ContextBudgetManager {
         enforceBudget: true,
         maxInputTokens: Math.max(
           1,
-          emergencyBudgetTokens + envelope.outputReserveTokens,
+          usableInputTokens + envelope.outputReserveTokens,
         ),
         enableRollingTurns: true,
         preserveLastNTurns: 2,
@@ -715,8 +726,17 @@ export class ContextBudgetManager {
     }
 
     let activeTextReplacements: ActiveTextReplacement[] = [];
-    if (!withinBudget && useEnforce && options.protectActiveTurn && recoveryWindow) {
-      const reduced = compactActiveTurnText(finalSelected.messages, recoveryWindow.entries, recoveryWindow.openTurn);
+    if (!withinBudget && options.protectActiveTurn && recoveryWindow) {
+      const compactorConfig = this.compactor.getConfig();
+      const reduced = compactActiveTurnText(
+        finalSelected.messages,
+        recoveryWindow.entries,
+        recoveryWindow.openTurn,
+        {
+          enableEarlyDraftCompaction: compactorConfig.enableEarlyDraftCompaction,
+          earlyDraftCompactionThreshold: compactorConfig.earlyDraftCompactionThreshold,
+        },
+      );
       if (reduced.replacements.length > 0) {
         const reducedCount = await this.counter.count({ ...envelope, history: reduced.messages });
         if (reducedCount.upperBoundTokens < finalAfter.upperBoundTokens) {
@@ -743,7 +763,10 @@ export class ContextBudgetManager {
     const largePrefix = isLargeHistoryPrefix(before.historyTokens, usableInputTokens);
     const requiredSavingsRatio = largePrefix ? 0.2 : 0.1;
     const materialSavings = tokensSaved >= 512
-      && tokensSaved / Math.max(1, before.upperBoundTokens) >= requiredSavingsRatio;
+      && (
+        tokensSaved / Math.max(1, before.upperBoundTokens) >= requiredSavingsRatio
+        || tokensSaved / Math.max(1, before.historyTokens) >= requiredSavingsRatio
+      );
     if (tokensSaved <= 0 || (before.upperBoundTokens <= usableInputTokens && !materialSavings)) {
       this.markRejectedCandidate(candidateKey);
       return {

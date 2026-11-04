@@ -94,16 +94,6 @@ export const DEFAULT_CAPABILITIES: CapabilityDescriptor[] = [
     description: 'Safely delete a file with intent and hash verification.',
   },
   {
-    name: 'filesystem.move',
-    toolName: 'move_file',
-    category: 'filesystem',
-    sideEffect: 'workspace',
-    reversible: true,
-    requiresApproval: false,
-    retryable: false,
-    description: 'Safely move or rename a file in workspace.',
-  },
-  {
     name: 'semantic.inspect',
     toolName: 'inspect_symbol',
     category: 'filesystem',

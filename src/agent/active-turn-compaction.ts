@@ -9,11 +9,19 @@ export interface ActiveTextReplacement {
   turn: number;
 }
 
+export interface ActiveTextReductionOptions {
+  enableEarlyDraftCompaction?: boolean;
+  earlyDraftCompactionThreshold?: number;
+}
+
 const MARKER = '[ACTIVE ASSISTANT TEXT COMPACTED';
 
 /** Extractive reduction, never a new model-generated claim or approval. */
-function reduceDraft(text: string, archiveId: string): string | undefined {
-  if (text.length < 12000 || text.includes(MARKER) || /```|~~~|\*\*\* (?:Begin Patch|Update File)/.test(text)) return undefined;
+function reduceDraft(text: string, archiveId: string, options?: ActiveTextReductionOptions): string | undefined {
+  const minLength = options?.enableEarlyDraftCompaction
+    ? Math.max(1000, options.earlyDraftCompactionThreshold ?? 5000)
+    : 12000;
+  if (text.length < minLength || text.includes(MARKER) || /```|~~~|\*\*\* (?:Begin Patch|Update File)/.test(text)) return undefined;
   const lines = text.split(/\r?\n/);
   // Keywords cannot identify every decision or constraint. Only collapse
   // adjacent exact duplicates: global dedup can detach repeated headings from
@@ -30,7 +38,12 @@ function reduceDraft(text: string, archiveId: string): string | undefined {
 }
 
 /** Only event-attributed assistant prose in the open turn is eligible. */
-export function compactActiveTurnText(history: Content[], entries: TurnWindowEntry[], openTurn?: number) {
+export function compactActiveTurnText(
+  history: Content[],
+  entries: TurnWindowEntry[],
+  openTurn?: number,
+  options?: ActiveTextReductionOptions,
+) {
   const archives: MaskedObservationRecord[] = [];
   const replacements: ActiveTextReplacement[] = [];
   const turnsByDigest = new Map<string, Set<number | undefined>>();
@@ -49,7 +62,7 @@ export function compactActiveTurnText(history: Content[], entries: TurnWindowEnt
       if (typeof part.text !== 'string' || part.functionCall || part.functionResponse) return part;
       const payloadHash = createHash('sha256').update(part.text).digest('hex').slice(0, 16);
       const id = `assistant-draft-${openTurn}-${beforeDigest.slice(0, 16)}-${partIndex}-${payloadHash}`;
-      const reduced = reduceDraft(part.text, id);
+      const reduced = reduceDraft(part.text, id, options);
       if (!reduced) return part;
       archives.push({ id, toolName: 'assistant_draft', timestamp: new Date().toISOString(),
         originalPayload: { content: part.text, turn: openTurn, messageDigest: beforeDigest, partIndex },

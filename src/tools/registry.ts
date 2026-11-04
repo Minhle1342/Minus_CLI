@@ -29,8 +29,8 @@ export interface ToolProvider {
 }
 
 /**
- * 8 canonical core tools exposed to LLM:
- * read_file, write_file, replace_text, list_files, search_text, run_command, web_search, web_fetch.
+ * 9 canonical core tools exposed to LLM:
+ * read_file, write_file, replace_text, list_files, search_text, run_command, web_search, web_fetch, delete_file.
  */
 export const CANONICAL_MODEL_TOOL_NAMES = new Set([
   'read_file',
@@ -88,7 +88,7 @@ function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
 
 /**
  * ToolRegistry quản lý danh bạ các Tool có sẵn trong hệ thống Coding Agent.
- * Chỉ đăng ký và phơi bày 8 tool cốt lõi cho LLM.
+ * Chỉ đăng ký và phơi bày 9 tool cốt lõi cho LLM.
  */
 export class ToolRegistry implements ToolProvider {
   private tools = new Map<string, ToolDefinition>();
@@ -106,25 +106,34 @@ export class ToolRegistry implements ToolProvider {
   ) {
     this.retriever = new ToolRetriever(retrieverConfig);
 
-    // Register ONLY the 8 canonical core tools
-    this.register(readFileTool);
-    this.register(listFilesTool);
-    this.register(searchTextTool);
-    this.register(replaceTextTool);
-    this.register(writeFileTool);
-    this.register(runCommandTool);
-    this.register(webSearchTool);
-    this.register(webFetchTool);
-    this.register(deleteFileTool);
+    // Register ONLY the canonical core tools. Index once at the end instead of
+    // rebuilding the retrieval index on every registration.
+    const registerAll = (tools: ToolDefinition[]): void => {
+      for (const tool of tools) this.tools.set(tool.name, tool);
+      this.retriever.indexTools(this.getAll());
+    };
+    registerAll([
+      readFileTool,
+      listFilesTool,
+      searchTextTool,
+      replaceTextTool,
+      writeFileTool,
+      runCommandTool,
+      webSearchTool,
+      webFetchTool,
+      deleteFileTool,
+    ]);
 
     // Register compatibility aliases (hidden from model declarations)
-    this.register(searchWebTool);
-    this.register(readUrlContentTool);
-    this.register(writeToFileTool);
-    this.register(replaceFileContentTool);
-    this.register(multiReplaceFileContentTool);
-    this.register(createFileTool);
-    this.register(searchCodebaseFastTool);
+    registerAll([
+      searchWebTool,
+      readUrlContentTool,
+      writeToFileTool,
+      replaceFileContentTool,
+      multiReplaceFileContentTool,
+      createFileTool,
+      searchCodebaseFastTool,
+    ]);
   }
 
   attachSession(_session: any): void {
@@ -250,7 +259,7 @@ export class ToolRegistry implements ToolProvider {
 
   /**
    * Xuất danh sách schema FunctionDeclaration đầy đủ cho LLM.
-   * Luôn chỉ chứa 8 tool cốt lõi đã qua modelVisibleTools.
+   * Luôn chỉ chứa 9 tool cốt lõi đã qua modelVisibleTools.
    */
   getFunctionDeclarations(): FunctionDeclaration[] {
     return modelVisibleTools(this.getAll())

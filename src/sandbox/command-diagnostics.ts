@@ -34,8 +34,8 @@ export const POSIX_TO_TOOL_SUGGESTIONS: Record<string, { tool: string; suggestio
     suggestion: 'POSIX command "cp" is unavailable on Windows shell. Use "read_file" combined with "create_file" to copy files safely within the workspace.',
   },
   mv: {
-    tool: 'move_file',
-    suggestion: 'POSIX command "mv" is unavailable on Windows shell. Use the dedicated "move_file" tool to move or rename files.',
+    tool: 'run_command',
+    suggestion: 'POSIX command "mv" is unavailable on Windows shell. Re-run it with shell "powershell" (Move-Item) through run_command; file moves may need approval.',
   },
 };
 

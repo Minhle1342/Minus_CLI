@@ -5870,6 +5870,7 @@ export class AgentLoop {
         before?.upperBoundTokens ?? result.stats.originalTokens,
         after?.upperBoundTokens ?? result.stats.compactedTokens,
         effectivePolicy,
+        before?.historyTokens ?? historyTokens,
       );
       if (!result.stats.prunedTurnsCount || !result.stats.archivedTurns?.length
         || !hasTokenSavings) {
@@ -5909,6 +5910,7 @@ export class AgentLoop {
         turnWindow: { preservedTurns, archivedTurnNumbers, archivedTurnIds: archivedIds },
       } as unknown as Record<string, unknown>);
       await this.persistSession(session);
+      this.contextBudgetManager.updatePostTurnCompaction(after?.upperBoundTokens, after?.historyTokens ?? result.stats.compactedTokens);
       CLI.renderAutoCompactionNotice(result.stats.tokensSaved, result.stats.compactedTokens);
     } catch {
       CLI.finishCompaction('failed');

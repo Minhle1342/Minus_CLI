@@ -168,25 +168,26 @@ export function buildGateStrongAdvisory(gate?: PreMutationGateContext): string[]
 }
 
 export const DEFAULT_TOOL_ALTERNATIVES: Record<string, string[]> = {
-  search_codebase_fast: ['grep_search', 'run_command (rg)', 'read_file'],
-  grep_search: ['search_codebase_fast', 'run_command (rg)'],
-  search_text: ['grep_search', 'read_file', 'run_command (rg)'],
-  read_file: ['read_compressed_code', 'run_command (cat/head)', 'inspect_symbol'],
-  read_compressed_code: ['read_file', 'inspect_symbol'],
-  pack_codebase: ['list_files', 'read_compressed_code'],
+  search_codebase_fast: ['search_text', 'run_command', 'read_file'],
+  grep_search: ['search_text', 'run_command'],
+  search_text: ['run_command', 'read_file'],
+  read_file: ['list_files', 'search_text', 'run_command'],
+  read_compressed_code: ['read_file'],
+  pack_codebase: ['list_files', 'read_file'],
   replace_text: ['write_file'],
-  query_call_graph: ['get_symbol_context_360', 'inspect_symbol', 'read_file', 'find_references'],
-  get_symbol_context_360: ['inspect_symbol', 'query_call_graph', 'find_references'],
-  get_route_map: ['grep_search', 'read_file'],
-  git_status: ['git_command', 'run_command (git status)'],
-  git_diff: ['git_command', 'run_command (git diff)'],
-  report_investigation_findings: ['read_file', 'search_codebase_fast'],
-  formulate_and_verify_hypothesis: ['get_symbol_context_360', 'query_call_graph', 'analyze_impact'],
-  replace_file_content: ['formulate_and_verify_hypothesis', 'get_symbol_context_360'],
-  write_to_file: ['formulate_and_verify_hypothesis', 'replace_file_content'],
-  web_search: ['search_web', 'read_url_content'],
-  search_web: ['read_url_content', 'run_command (curl)'],
-  read_url_content: ['search_web', 'run_command (curl)'],
+  query_call_graph: ['read_file', 'search_text'],
+  get_symbol_context_360: ['read_file', 'search_text'],
+  get_route_map: ['search_text', 'read_file'],
+  git_status: ['run_command'],
+  git_diff: ['run_command'],
+  git_command: ['run_command'],
+  report_investigation_findings: ['read_file', 'search_text'],
+  formulate_and_verify_hypothesis: ['run_command', 'read_file'],
+  replace_file_content: ['replace_text', 'write_file'],
+  write_to_file: ['write_file', 'replace_text'],
+  web_search: ['run_command'],
+  search_web: ['web_search', 'run_command'],
+  read_url_content: ['web_fetch', 'run_command'],
   run_node_script: ['replace_text', 'run_command'],
 };
 
@@ -697,7 +698,7 @@ export class ToolUseGuardian {
           error: errorMsg,
           errorCode: 'UNVERIFIED_MUTATION_BLOCKED',
           reason: errorMsg,
-          suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+          suggestedAlternative: targetInspected ? 'replace_text' : 'read_file',
           suggestedTool: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
           suggestedArgs: targetInspected ? undefined : { path: filePath },
           guardianDiagnosis: {
@@ -709,7 +710,7 @@ export class ToolUseGuardian {
             recoveryAction: targetInspected
               ? 'Formulate and verify hypothesis first'
               : `Call read_file("${filePath}") first to inspect target lines, verify indentation, and obtain current contentHash.`,
-            suggestedAlternative: targetInspected ? 'formulate_and_verify_hypothesis' : 'read_file',
+            suggestedAlternative: targetInspected ? 'replace_text' : 'read_file',
           },
         };
       }

@@ -103,14 +103,13 @@ export class Harness2RecursiveEngine {
       // 2. Invariant Candidate for Plan mode: Strict mutation lockdown and architectural inspection
       const planInvGates = [
         ...baseScaffold.negativeGate,
-        '🔒 [PHASE LOCK: PLAN] NEVER attempt code mutations (DO NOT call replace_text, apply_patch, write_file, write_to_file) during the PLAN phase.',
+        '🔒 [PHASE LOCK: PLAN] NEVER attempt code mutations (DO NOT call replace_text or write_file) during the PLAN phase.',
         'NEVER call submit_solution or update_plan_task before completing the architectural survey and recording the plan.',
         'ALWAYS inspect caller references and quantify blast radius before committing to an architectural decomposition.',
       ];
       const planInvToolGuidance: Record<string, string> = {
         ...baseCatalog,
         replace_text: '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Code modifications are strictly prohibited during the Plan phase. Survey, inspect, and plan ONLY.',
-        apply_patch: '🔒 [PHASE LOCK: MUTATION FORBIDDEN IN PLAN MODE] Applying code patches is strictly prohibited during the Plan phase.',
         read_file: 'Inspect exact file contents and line numbers for architectural understanding. Primary read-only tool.',
         search_text: 'Search codebase for symbols, callers, and architectural references.',
       };
@@ -184,7 +183,6 @@ export class Harness2RecursiveEngine {
     const implInvToolGuidance: Record<string, string> = {
       ...baseCatalog,
       replace_text: 'STRICT INVARIANT: MUST inspect lines via read_file immediately prior to mutation. MUST pass expectedFileHash. MUST immediately verify via get_diagnostics post-mutation.',
-      apply_patch: 'STRICT INVARIANT: Apply minimal unified diff hunk. MUST inspect git diff and compiler diagnostics after applying.',
       run_command: 'STRICT INVARIANT: MUST NOT use sleep polling; use schedule. Run build and test verification commands immediately after each surgical edit.',
       get_diagnostics: 'STRICT INVARIANT: Inspect compiler feedback immediately after editing a file. Never tolerate lingering compilation errors.',
       submit_solution: 'STRICT INVARIANT: MUST verify exit code 0 on testCommand before submission. Fake mocks or synthetic assertions are strictly rejected.',

@@ -137,10 +137,10 @@ export class MutationTransaction {
       const currentHash = await computeFileHash(safePath);
       if (currentHash !== 'sha256:absent' && op.expectedAbsent !== false) {
         return toolError(
-          `File "${op.path}" already exists on disk. create_file does not allow blind overwrite. Use replace_text or apply_patch to update.`,
+          `File "${op.path}" already exists on disk. create_file does not allow blind overwrite. Use replace_text or write_file to update.`,
           'FILE_ALREADY_EXISTS',
           { path: op.path, currentHash },
-          'Inspect file with read_file before modifying, or use replace_text/apply_patch.',
+          'Inspect file with read_file before modifying, or use replace_text/write_file.',
         );
       }
 

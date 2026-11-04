@@ -74,8 +74,8 @@ export class ToolSynergyAdvisor {
     if (!lastToolName && detectBugReportIntent(userRequest)) {
       return {
         playbook: 'B_DEBUGGING',
-        guidance: `[ROOT-CAUSE:REPORT] User reported a bug or error. Do not guess or monkey-patch. Protocol: ${ROOT_CAUSE_STEPS} via search/read_file/query_call_graph. Investigate in proportion to risk and pivot only after repeated equivalent failure or falling confidence.`,
-        suggestedTools: ['search_codebase_fast', 'read_file', 'run_command', 'query_call_graph'],
+        guidance: `[ROOT-CAUSE:REPORT] User reported a bug or error. Do not guess or monkey-patch. Protocol: ${ROOT_CAUSE_STEPS} via search_text/read_file. Investigate in proportion to risk and pivot only after repeated equivalent failure or falling confidence.`,
+        suggestedTools: ['search_text', 'read_file', 'run_command'],
       };
     }
 
@@ -96,8 +96,8 @@ export class ToolSynergyAdvisor {
     ) {
       return {
         playbook: 'D_ASYNC_CLI',
-        guidance: 'Background task is active. Use "schedule" (with TimerCondition) to wait reactively without polling, or "manage_task(send_input)" if interactive prompt is waiting.',
-        suggestedTools: ['schedule', 'manage_task'],
+        guidance: 'Background task is active. Wait reactively for completion or use "manage_task(send_input)" if interactive prompt is waiting.',
+        suggestedTools: ['manage_task'],
       };
     }
 
@@ -283,8 +283,33 @@ export class ToolSynergyAdvisor {
     if (advice.playbook === 'A_DISCOVERY' || advice.playbook === 'GENERAL') {
       return '';
     }
-    const toolsText = advice.suggestedTools.length > 0
-      ? advice.suggestedTools.join(', ')
+    const CANONICAL_VISIBLE_TOOLS = new Set([
+      'read_file',
+      'write_file',
+      'replace_text',
+      'list_files',
+      'search_text',
+      'run_command',
+      'web_search',
+      'web_fetch',
+      'delete_file',
+      'manage_task',
+    ]);
+    const ADVICE_TOOL_MAP: Record<string, string> = {
+      search_codebase_fast: 'search_text',
+      write_to_file: 'write_file',
+      create_file: 'write_file',
+      replace_file_content: 'replace_text',
+      multi_replace_file_content: 'replace_text',
+      search_web: 'web_search',
+      read_url_content: 'web_fetch',
+    };
+    const sanitizedTools = advice.suggestedTools
+      .map((t) => ADVICE_TOOL_MAP[t] || t)
+      .filter((t) => CANONICAL_VISIBLE_TOOLS.has(t) || t.startsWith('browser_'))
+      .filter((t, i, arr) => arr.indexOf(t) === i);
+    const toolsText = sanitizedTools.length > 0
+      ? sanitizedTools.join(', ')
       : '(None - Conclude with Final Answer)';
     return `[TOOL PLAYBOOK GUIDANCE - ${advice.playbook}]\n→ Recommended next actions: ${advice.guidance}\n→ Suggested tools: ${toolsText}`;
   }

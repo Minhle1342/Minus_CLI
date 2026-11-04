@@ -35,7 +35,7 @@ mode; configure the existing permission policy explicitly when needed.
 | Ctrl+O | Collapse or expand thought/tool entries |
 
 Plan mode applies read_only permissions and uses the same planning workflow as
-`/plan`, including the harness `create_plan` tool. Returning to Implement
+`/plan`. Returning to Implement
 restores the previous permission policy. After reviewing the plan, switch to
 Implement and run `/plan resume` to continue its first incomplete task.
 

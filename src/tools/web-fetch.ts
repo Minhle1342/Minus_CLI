@@ -1,4 +1,5 @@
 import { Type } from '@google/genai';
+import net from 'node:net';
 import { ToolDefinition } from './types.js';
 import { getGitHubCredential } from './github-credential.js';
 
@@ -6,6 +7,30 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 const DEFAULT_MAX_LENGTH = 4_000;
 const MAX_ALLOWED_LENGTH = 50_000;
 const DEFAULT_CACHE_TTL_MS = 5 * 60 * 1_000; // 5 minutes
+
+/**
+ * Block loopback/private/link-local fetch targets. In read-only mode run_command
+ * is denied, so web_fetch was the remaining way to reach local admin endpoints.
+ * shortcut: hostname aliases that resolve to a private IP are not resolved; add a
+ * DNS pre-check if page content ever becomes attacker-controlled.
+ */
+function blockedFetchHost(hostname: string): boolean {
+  if (process.env.MINUS_ALLOW_PRIVATE_FETCH === '1') return false;
+  const host = hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost') || host.endsWith('.local') || host === 'metadata.google.internal') return true;
+  if (net.isIPv4(host)) {
+    const [a, b] = host.split('.').map(Number);
+    return a === 0 || a === 10 || a === 127 || a >= 224
+      || (a === 169 && b === 254)
+      || (a === 172 && b >= 16 && b <= 31)
+      || (a === 192 && b === 168);
+  }
+  if (net.isIPv6(host)) {
+    return host === '::' || host === '::1' || host.startsWith('::ffff:')
+      || host.startsWith('fc') || host.startsWith('fd') || /^fe[89ab]/.test(host);
+  }
+  return false;
+}
 
 export interface WebFetchToolOptions {
   timeoutMs?: number;
@@ -296,6 +321,13 @@ export function createWebFetchTool(options: WebFetchToolOptions = {}): ToolDefin
         }
       } catch {
         return { error: 'Invalid URL format.', errorCode: 'MALFORMED_URL' };
+      }
+
+      if (blockedFetchHost(parsedUrl.hostname)) {
+        return {
+          error: `Refusing to fetch "${parsedUrl.hostname}": loopback/private targets are blocked. Set MINUS_ALLOW_PRIVATE_FETCH=1 to allow.`,
+          errorCode: 'PRIVATE_HOST_BLOCKED',
+        };
       }
 
       const githubAuth = args.github_auth === 'gcm';

@@ -526,13 +526,35 @@ export class SessionPersistence {
       const raw = await fs.readFile(filePath, 'utf8');
       const lines = raw.split(/\r?\n/).filter(Boolean);
       if (lines.length === 0) return undefined;
+      // A crash during append can leave a torn last line. The writer always ends
+      // with '\n', so a final line without one is only kept when it parses.
+      if (!raw.endsWith('\n')) {
+        try {
+          JSON.parse(lines[lines.length - 1]);
+        } catch {
+          lines.pop();
+        }
+      }
 
-      const header = JSON.parse(lines[0]) as SessionFileHeader;
+      let header: SessionFileHeader;
+      try {
+        header = JSON.parse(lines[0]) as SessionFileHeader;
+      } catch {
+        throw new Error(`Malformed session header in ${filePath}.`);
+      }
       if (header.kind !== 'session' || header.version !== 1 || !header.id || !header.createdAt) {
         throw new Error(`Malformed session header in ${filePath}.`);
       }
 
-      const events = lines.slice(1).map((line) => JSON.parse(line) as SessionEvent);
+      const events = lines.slice(1).map((line, index) => {
+        try {
+          return JSON.parse(line) as SessionEvent;
+        } catch {
+          // Named message so loadOrQuarantine treats this as corruption instead
+          // of a fatal startup error.
+          throw new Error(`Invalid session event at line ${index + 2} in ${filePath}.`);
+        }
+      });
       for (let index = 0; index < events.length; index++) {
         if (events[index].seq !== index + 1) {
           throw new Error(`Non-contiguous session event sequence in ${filePath}.`);
