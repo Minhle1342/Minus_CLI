@@ -1,6 +1,6 @@
 ﻿import { deleteBackward, deleteForward, deleteWordBackward, moveCursor, getNextGraphemeLength } from '../../input-line-editor.js';
 import type { ComposerModel, KeyMsg, Msg } from '../types.js';
-import { color, displayWidth, fit, paintInput, tokyoNight, wrap } from '../styles/theme.js';
+import { color, displayWidth, fit, paintInput, stripTerminalControls, tokyoNight, wrap } from '../styles/theme.js';
 export const INPUT_PLACEHOLDER = 'Work with Minus';
 /** SGR underline cho cursor cell + placeholder (không có trong theme helper). */
 const UNDERLINE = '\x1b[4m';
@@ -27,7 +27,7 @@ export function updateComposer(state: ComposerModel, msg: Msg): ComposerModel {
   switch (msg.key) {
     case 'text': case 'paste': case 'shift+enter': case 'alt+enter': case 'ctrl+j': {
       // P1: Ctrl+J is a newline fallback for terminals where Shift+Enter never arrives.
-      const text = msg.key.includes('enter') || msg.key === 'ctrl+j' ? '\n' : (msg.text || '').replace(/\r\n?/g, '\n').replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
+      const text = msg.key.includes('enter') || msg.key === 'ctrl+j' ? '\n' : stripTerminalControls(msg.text || '').replace(/\r\n?/g, '\n').replace(/[\x00-\x08\x0b-\x1f\x7f]/g, '');
       edit = { value: before + text + after, cursorOffset: state.cursorOffset + text.length }; break;
     }
     case 'backspace': {
@@ -138,11 +138,7 @@ export function composerView(state: ComposerModel, width: number, height: number
   const length = getNextGraphemeLength(state.value.slice(state.cursorOffset));
   const cell = state.value.slice(state.cursorOffset, state.cursorOffset + length) || ' ';
   // P1: underline + cyan cursor cell — reverse-only blocks read as selection.
-  const pastedLabel = (text: string) => text.split(/(\[Pasted ~\d+ lines\])/g).map((part) =>
-    /^\[Pasted ~\d+ lines\]$/.test(part)
-      ? PASTED_BG + color(tokyoNight.background, part) + RESET
-      : color(tokyoNight.text, part),
-  ).join('');
+  const pastedLabel = (text: string) => color(tokyoNight.text, text).replace(/\[Pasted ~\d+ lines\]/g, (match) => PASTED_BG + color(tokyoNight.background, match) + RESET);
   const cursorText = pastedLabel(before)
     + UNDERLINE + color(tokyoNight.cyan, cell)
     + pastedLabel(state.value.slice(state.cursorOffset + length));
@@ -150,25 +146,18 @@ export function composerView(state: ComposerModel, width: number, height: number
   const inputText = placeholder
     ? UNDERLINE + color(tokyoNight.cyan, INPUT_PLACEHOLDER.slice(0, 1)) + color(tokyoNight.muted, INPUT_PLACEHOLDER.slice(1))
     : cursorText;
-  const lines = wrap(color(tokyoNight.blue, '› ') + inputText, width);
-  const cursorRow = wrap('› ' + before, width).length - 1;
+  // ponytail: Hard character wrap (wordWrap: false) để ký tự lấp đầy dòng 1 và tràn đều xuống dòng 2; ẩn indicator cur/total
+  const lines = wrap(color(tokyoNight.blue, '› ') + inputText, width, { wordWrap: false });
+  const cursorRow = wrap('› ' + before, width, { wordWrap: false }).length - 1;
   const start = Math.max(0, cursorRow - height + 1);
   // Wrap-continuation marker: every visual row that continues on the next row ends with ¬.
   const rows = lines.slice(start, start + height).map((line, i) => {
     const continued = start + i < lines.length - 1;
     if (continued && width > 1) {
-      const truncated = wrap(line, width - 1)[0] || '';
+      const truncated = wrap(line, width - 1, { wordWrap: false })[0] || '';
       return fit(truncated, width - 1) + color(tokyoNight.muted, '¬');
     }
     return fit(line, width);
   });
-  // P1: multiline position indicator (cur/total) on the last visible row.
-  if (lines.length > 1 && rows.length && width > 8) {
-    const label = ` ${cursorRow + 1}/${lines.length}`;
-    const budget = Math.max(0, width - displayWidth(label));
-    const content = rows[rows.length - 1].replace(/\s+$/, '');
-    const truncated = wrap(content, Math.max(1, budget))[0] || '';
-    rows[rows.length - 1] = fit(truncated, budget) + color(tokyoNight.muted, label);
-  }
   return rows.map(paintInput);
 }

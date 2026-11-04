@@ -1,5 +1,5 @@
 import type { ViewportModel, TranscriptEntry, SessionTab, SessionTabsModel, RootModel, Cmd, KeyMsg, ComposerModel, DiffViewerModel } from '../types.js';
-import { color, displayWidth, fit, lipGlossTheme, stripTerminalControls, tokyoNight, wrap } from '../styles/theme.js';
+import { color, displayWidth, fit, lipGlossTheme, paintInput, stripTerminalControls, tokyoNight, wrap } from '../styles/theme.js';
 import { formatMarkdownTablesWithTea } from '../styles/table.js';
 import { toolCallEntry, toolResultEntry, mergedToolEntry, diffFrame, diffLineTone } from './tool-entry.js';
 import { createComposer } from './composer-model.js';
@@ -561,9 +561,14 @@ function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, p
           const body = isAnswerLike ? formatAnswer(entry.text, width)
             : entry.kind === 'tool' ? formatTool(entry.text)
             : color(textColor, stripTerminalControls(entry.text));
-          rendered = entry.kind === 'permission' && entry.permission
-            ? permissionLines(entry.permission, width)
-            : wrap(color(prefixColor, prefix) + body, width);
+          if (entry.kind === 'permission' && entry.permission) {
+            rendered = permissionLines(entry.permission, width);
+          } else if (entry.kind === 'user') {
+            // ponytail: Tô khối màu xám nhạt (#292e42 - tokyoNight.inputBackground) trải dài full-width cho khối lệnh user đã gửi
+            rendered = wrap(color(prefixColor, prefix) + body, width).map(line => paintInput(fit(line, width)));
+          } else {
+            rendered = wrap(color(prefixColor, prefix) + body, width);
+          }
           widths.set(width, rendered);
         }
       }

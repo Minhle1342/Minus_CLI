@@ -726,9 +726,9 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         const item = model.composer.completions[model.composer.selected];
         return [{ ...model, composer: { ...model.composer, value: item.value, cursorOffset: item.cursor ?? item.value.length, completions: [] } }, []];
       }
-      if ((msg.key === ' ' || (msg.key === 'text' && msg.text === ' ')) && !model.composer.completionDismissed && !model.composer.selection) {
-        const selected = model.composer.completionDismissed ? undefined : model.composer.completions[model.composer.selected];
-        if (selected) {
+      if ((msg.key === ' ' || (msg.key === 'text' && msg.text === ' ')) && model.composer.completions.length && !model.composer.completionDismissed && !model.composer.selection) {
+        const selected = model.composer.completions[model.composer.selected];
+        if (selected && model.composer.value.startsWith('/')) {
           const cursor = selected.cursor ?? selected.value.length;
           const suffix = selected.value.slice(cursor);
           const separator = suffix.startsWith(' ') ? '' : ' ';

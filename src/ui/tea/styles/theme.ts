@@ -10,10 +10,10 @@ export function stripTerminalControls(text: string, keepColor = false): string {
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, char => keepColor && char === '\x1b' ? char : '')
     .replace(/\r/g, '');
 }
-export function wrap(text: string, width: number): string[] {
+export function wrap(text: string, width: number, options?: { wordWrap?: boolean; hard?: boolean; trim?: boolean }): string[] {
   const clean = stripTerminalControls(text, true);
   if (width < 2) return Array.from(clean.split('\n'), line => stringWidth(line) <= width ? line : '');
-  return wrapAnsi(clean, Math.max(1, width), { hard: true, trim: false }).split('\n');
+  return wrapAnsi(clean, Math.max(1, width), { hard: true, trim: false, ...options }).split('\n');
 }
 export function fit(text: string, width: number): string {
   if (width <= 0) return '';
