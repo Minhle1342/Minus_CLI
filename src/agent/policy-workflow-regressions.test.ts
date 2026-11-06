@@ -37,6 +37,29 @@ test('explicit pull can complete a remote prerequisite before implementation', (
   assert.equal(workflow(request, [...baseline, outcome(8, 'git pull origin', { exitCode: 1, success: false })], true).stage, 'Inspect');
 });
 
+test('batched inspection git status && git diff HEAD satisfies Inspect in 1 turn', () => {
+  const request = 'please git add and git commit';
+  const batchedOutcome = outcome(2, 'git status -s && git diff HEAD');
+  const state = workflow(request, [batchedOutcome]);
+  assert.equal(state.stage, 'Commit');
+});
+
+test('clean git status output auto-satisfies diffs without extra round-trips', () => {
+  const request = 'please git add and git commit';
+  const cleanStatusOutcome = outcome(2, 'git status', {
+    stdout: 'On branch main\nnothing to commit, working tree clean',
+  });
+  const state = workflow(request, [cleanStatusOutcome]);
+  assert.equal(state.stage, 'Commit');
+});
+
+test('branch-only workflow is satisfied by git status alone', () => {
+  const request = 'please create branch feature/new';
+  const statusOutcome = outcome(2, 'git status');
+  const state = workflow(request, [statusOutcome]);
+  assert.equal(state.stage, 'Branch');
+});
+
 test('stage guidance names the missing evidence', () => {
   const request = 'please git add and git commit';
   const partial = [outcome(2, 'git status'), outcome(4, 'git diff')];

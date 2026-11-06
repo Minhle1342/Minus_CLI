@@ -252,11 +252,35 @@ export function resolveGitWorkflow(input: GitWorkflowInput): GitWorkflowState | 
       }
       if (stage === 'Inspect') {
         if (remotePrerequisites.includes(op.name)) inspected.add(op.name);
-        if (op.name === 'status') inspected.add('status');
-        const baselineDiff = op.name === 'diff' && op.args.every((arg) => arg.startsWith('-'))
+        if (op.name === 'status') {
+          inspected.add('status');
+          // Latency optimization: If status reports clean working tree, unstaged & staged diffs are guaranteed empty
+          const stdout = typeof payload.stdout === 'string' ? payload.stdout : '';
+          const isClean = stdout.includes('nothing to commit, working tree clean')
+            || (op.args.includes('-s') && stdout.trim() === '');
+          if (isClean) {
+            inspected.add('unstaged diff');
+            inspected.add('staged diff');
+          } else if (stdout.length > 0 && !stdout.includes('Changes to be committed') && !/^[MADRC]\s/m.test(stdout)) {
+            inspected.add('staged diff');
+          }
+        }
+        const isHeadDiff = op.name === 'diff' && op.args.some((arg) => arg.toUpperCase() === 'HEAD');
+        const baselineDiff = op.name === 'diff' && op.args.every((arg) => arg.startsWith('-') || arg.toUpperCase() === 'HEAD')
           && !op.args.some((arg) => ['--quiet', '--check', '--no-index', '--'].includes(arg));
-        if (baselineDiff) inspected.add(op.args.includes('--cached') || op.args.includes('--staged') ? 'staged diff' : 'unstaged diff');
-        if (['status', 'unstaged diff', 'staged diff', ...remotePrerequisites].every((name) => inspected.has(name))) advance(seq);
+        if (baselineDiff) {
+          if (isHeadDiff) {
+            inspected.add('unstaged diff');
+            inspected.add('staged diff');
+          } else {
+            inspected.add(op.args.includes('--cached') || op.args.includes('--staged') ? 'staged diff' : 'unstaged diff');
+          }
+        }
+        const isBranchOnlyWorkflow = branchOps.length > 0 && !scope.commit && !scope.implement && !scope.pr && !syncOps.length;
+        const requiredInspection = isBranchOnlyWorkflow
+          ? ['status', ...remotePrerequisites]
+          : ['status', 'unstaged diff', 'staged diff', ...remotePrerequisites];
+        if (requiredInspection.every((name) => inspected.has(name))) advance(seq);
       } else if (stage === 'Branch') {
         if (scope.operations.some((name) => BRANCH.has(name)) && branchOperationAction(op) === branchActions[completedBranchActions]) {
           completedBranchActions++;
@@ -292,7 +316,13 @@ export function resolveGitWorkflow(input: GitWorkflowInput): GitWorkflowState | 
     if (state.stage === 'PR' && scope.pr !== 'publish' && ok
       && ['report_findings', 'report_investigation_findings', 'submit_solution'].includes(toolName)) advance(seq);
   }
-  if (state.stage === 'Inspect') state.pending = ['status', 'unstaged diff', 'staged diff', ...remotePrerequisites].filter((name) => !inspected.has(name));
+  if (state.stage === 'Inspect') {
+    const isBranchOnlyWorkflow = branchOps.length > 0 && !scope.commit && !scope.implement && !scope.pr && !syncOps.length;
+    const requiredInspection = isBranchOnlyWorkflow
+      ? ['status', ...remotePrerequisites]
+      : ['status', 'unstaged diff', 'staged diff', ...remotePrerequisites];
+    state.pending = requiredInspection.filter((name) => !inspected.has(name));
+  }
   if (state.stage === 'Branch') {
     state.pendingBranchAction = branchActions[completedBranchActions];
     state.pending = branchActions.slice(completedBranchActions).map((action) => `branch ${action}`);
@@ -312,5 +342,9 @@ export function resolveGitWorkflow(input: GitWorkflowInput): GitWorkflowState | 
 
 export function gitWorkflowGuidance(state: GitWorkflowState): string {
   const run = pendingEvidenceCommands(state.pending);
-  return `[GIT WORKFLOW STATE]\nCurrent stage: ${state.stage}. Completed: ${state.completed.map((item) => item.stage).join(' -> ') || 'none'}. Skipped (not requested): ${state.skipped.join(', ') || 'none'}.\nAuthorized operations: ${state.scope.operations.join(', ') || 'none'}; code implementation: ${state.scope.implement}; PR: ${state.scope.pr ?? 'none'}.\n${state.pending.length ? `Required evidence: ${state.pending.join(', ')}.${run.length ? ` Run: ${run.join(', ')}.` : ''}\n` : ''}${state.blocked ? `${state.blocked}\n` : ''}Use separate tool calls for stages. Tool attempts, background starts, dry runs, and narrative claims do not complete a stage. Preserve user changes and the requested paths/refs/remotes; this state does not broaden authorization. ${state.stage === 'Done' ? 'Requested Git workflow is complete; do not repeat Git mutations.' : 'Complete only the current authorized stage before the next Git mutation.'}`;
+  const runBatch = run.length > 1 ? run.join(' && ') : run[0] || '';
+  const runText = run.length
+    ? `Required evidence: ${state.pending.join(', ')}. Run: ${run.join(', ')}${run.length > 1 ? ` (or batched: \`${runBatch}\`)` : ''}.\n`
+    : '';
+  return `[GIT WORKFLOW STATE]\nCurrent stage: ${state.stage}. Completed: ${state.completed.map((item) => item.stage).join(' -> ') || 'none'}. Skipped (not requested): ${state.skipped.join(', ') || 'none'}.\nAuthorized operations: ${state.scope.operations.join(', ') || 'none'}; code implementation: ${state.scope.implement}; PR: ${state.scope.pr ?? 'none'}.\n${runText}${state.blocked ? `${state.blocked}\n` : ''}Commands within the same stage can be batched with \`&&\`. Use separate tool calls only across distinct stages. ${state.stage === 'Done' ? 'Requested Git workflow is complete; do not repeat Git mutations.' : 'Complete only the current authorized stage before the next Git mutation.'}`;
 }
