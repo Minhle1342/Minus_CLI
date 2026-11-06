@@ -73,15 +73,10 @@ const MUTATION_TOOLS = new Set([
 ]);
 
 const INSPECTION_TOOLS = new Set([
-  'view_file',
   'read_file',
-  'grep_search',
-  'search_text',
-  'search_codebase_fast',
-  'list_files',
-  'read_url_content',
-  'inspect_symbol',
-  'find_references',
+  'run_command',
+  'web_fetch',
+  'web_search',
 ]);
 
 export class ProcessFailureDetector {

@@ -48,11 +48,7 @@ export function isExploratoryCommand(
 
 const PASSIVE_INSPECTION_TOOLS = new Set([
   'read_file',
-  'list_files',
-  'search_codebase_fast',
-  'search_text',
-  'read_url_content',
-  'search_web',
+  'run_command',
   'web_search',
   'web_fetch',
 ]);

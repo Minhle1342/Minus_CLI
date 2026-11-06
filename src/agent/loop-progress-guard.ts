@@ -42,20 +42,12 @@ const WORKSPACE_MUTATING_TOOLS = new Set([
 ]);
 
 const GUARDED_INSPECTION_TOOLS = new Set([
-  'list_files',
   'read_file',
-  'search_text',
-  'search_codebase_fast',
+  'run_command',
   'web_search',
-  'read_compressed_code',
-  'pack_codebase',
-  'read_memory',
+  'web_fetch',
   'git_status',
-  'list_worktrees',
   'submit_solution',
-  'inspect_symbol',
-  'find_references',
-  'get_diagnostics',
 ]);
 
 export interface TrajectoryOscillationStatus {
