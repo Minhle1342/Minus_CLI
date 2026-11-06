@@ -4,15 +4,15 @@ import type { ClassificationDecision } from './classification-types.js';
 import { ToolDescriptorRegistry, READ_TOOL_NAMES, EDIT_TOOL_NAMES } from './tool-descriptor-registry.js';
 import { isOrchestrationTool, ORCHESTRATION_SPAWN_TOOL_NAMES } from './phase-tool-effects.js';
 import { hasCodeGraphIndexSync } from '../search/codegraph-client.js';
-import { hasNetworkIntent } from './network-intent.js';
+import { hasNetworkIntent, hasWebIntent } from './network-intent.js';
 import type { GateReader } from '../security/full-access-gates.js';
 
 const PHASE_TRANSITION_TASK_CLASSES = new Set(['bugfix', 'feature', 'refactor', 'question', 'exploration']);
 
 /** Small phase-specific exploration anchors pinned after relevance retrieval. */
 const PHASE_EXPLORE_TOOL_ANCHORS: Record<string, readonly string[]> = {
-  explore: ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics', 'run_command'],
-  plan: ['read_file', 'list_files', 'search_text', 'search_codebase_fast', 'inspect_symbol', 'codegraph_explore', 'codegraph_impact', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology'],
+  explore: ['read_file', 'run_command', 'codegraph_search', 'codegraph_explore', 'get_symbol_context_360', 'get_diagnostics'],
+  plan: ['read_file', 'run_command', 'inspect_symbol', 'codegraph_explore', 'codegraph_impact', 'analyze_impact', 'get_symbol_context_360', 'get_architecture_topology'],
   implement: ['read_file', 'get_symbol_context_360', 'get_diagnostics'],
   verify: ['read_file', 'get_diagnostics', 'run_command'],
   release: [],
@@ -146,7 +146,7 @@ export class ThisTurnToolGate {
     const anchors = [...filteredAnchors];
     // Pin web tools when the turn needs network: pasted URL, explicit web
     // request, or proactive refresh. Guarantees visibility even if RATS ranks low.
-    if (required.has('network') || hasNetworkIntent(options?.userRequest)) {
+    if (required.has('network') || hasNetworkIntent(options?.userRequest) || hasWebIntent(options?.userRequest)) {
       for (const name of ['web_search', 'web_fetch']) {
         if (names.includes(name) && !anchors.includes(name)) anchors.push(name);
       }

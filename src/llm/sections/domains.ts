@@ -27,13 +27,13 @@ export const SECTION_TABULAR_OUTPUT = `TABULAR OUTPUT (TERMINAL/TUI):
  */
 
 export const SECTION_SEMANTIC_BLAST_RADIUS_FULL = `### CODEBASE INSPECTION & BLAST RADIUS CONTAINMENT:
-   - Use list_files to locate related source and test files.
+   - Use run_command (\`rg --files\`, \`rg -n\`) to locate related source and test files.
    - Use read_file to examine declarations, signatures, and callers.
    - Use run_command to run tests and typecheckers before and after edits.`;
 
 export const SECTION_TERMINAL_SANDBOX_FULL = `### TERMINAL-FIRST EXPLORATION & SANDBOX EXECUTION:
    - Use \`run_command\` for exploration, scripting, and verification; each result reports where the command actually ran.
-   - CODEBASE EXPLORATION: Use terminal search (\`rg\`, \`grep\`, \`find\`, \`git log\`) or \`list_files\`.
+   - CODEBASE EXPLORATION: Use terminal search (\`rg\`, \`grep\`, \`find\`, \`git log\`) or \`ls\`/\`dir\`.
    - FILE INSPECTION: prefer \`read_file\` over \`cat\`, \`sed\`, \`head\`, \`tail\`.
    - FILE MUTATION: ${FILE_MUTATION_SAFETY_RULE}
    - BUILD, TEST & SERVER RUNTIME: use \`run_command\` for tests (\`npm test\`, \`pytest\`, \`go test\`, \`cargo test\`), builds (\`npm run build\`, \`tsc\`, \`go build\`), and dependency management. Check startup logs, confirm the listening port/URL, and report status.`;
@@ -48,7 +48,7 @@ export const SECTION_ANTIGRAVITY_TOOLCHAIN_FULL = `### COMMAND EXECUTION & WEB R
      * Use \`web_fetch\` to pull docs, READMEs, or API guides as clean Markdown.`;
 
 export const SECTION_CODEBASE_INTELLIGENCE_FULL = `### CODEBASE EXPLORATION & ARCHITECTURE PROTOCOL:
-   - Use \`list_files\` to explore project structure.
+   - Use \`run_command\` (\`rg --files\`, \`ls\`, \`dir\`) to explore project structure.
    - Use \`read_file\` to inspect module definitions, signatures, and imports.
    - Edit with \`replace_text\` (or \`replace_file_content\` / \`multi_replace_file_content\`); create or overwrite with \`write_file\` (or \`write_to_file\` / \`create_file\`).
    - Use \`run_command\` for shell, containers, databases, builds, tests, and environment scripts.`;

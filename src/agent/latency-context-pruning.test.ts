@@ -15,7 +15,7 @@ test('ToolRetriever - Adaptive Tool Schema Pruning preserves core anchors on reg
 
   // Core Anchor Tools phải luôn hiện diện (bảo toàn 100% accuracy)
   assert.ok(regularToolNames.includes('read_file'), 'Must include read_file');
-  assert.ok(regularToolNames.includes('search_text'), 'Must include search_text');
+  assert.ok(regularToolNames.includes('write_file'), 'Must include write_file');
   assert.ok(regularToolNames.includes('replace_text'), 'Must include replace_text');
   assert.ok(regularToolNames.includes('run_command'), 'Must include run_command');
 
@@ -42,5 +42,5 @@ test('ToolRetriever - Schema token reduction preserves anchor tools and stays wi
   const names = new Set(prunedDeclarations.map((d) => d.name));
   assert.ok(names.has('run_command'), 'Must retain run_command');
   assert.ok(names.has('read_file'), 'Must retain read_file');
-  assert.ok(names.has('search_text'), 'Must retain search_text');
+  assert.equal(names.has('search_text'), false, 'Hidden legacy tools stay out of the core anchors');
 });

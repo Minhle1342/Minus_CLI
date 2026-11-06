@@ -168,13 +168,17 @@ export function buildGateStrongAdvisory(gate?: PreMutationGateContext): string[]
 }
 
 export const DEFAULT_TOOL_ALTERNATIVES: Record<string, string[]> = {
-  search_codebase_fast: ['search_text', 'run_command', 'read_file'],
+  search_codebase_fast: ['run_command', 'read_file'],
   search_text: ['run_command', 'read_file'],
-  read_file: ['list_files', 'search_text', 'run_command'],
+  list_files: ['run_command'],
+  read_file: ['run_command'],
   replace_text: ['write_file'],
   replace_file_content: ['replace_text', 'write_file'],
   write_to_file: ['write_file', 'replace_text'],
+  write_file: ['replace_text'],
+  delete_file: ['run_command'],
   web_search: ['run_command'],
+  web_fetch: ['run_command'],
   search_web: ['web_search', 'run_command'],
   read_url_content: ['web_fetch', 'run_command'],
 };

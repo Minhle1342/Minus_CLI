@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { hasNetworkIntent } from './network-intent.js';
+import { hasNetworkIntent, hasWebIntent } from './network-intent.js';
 
 test('detects pasted URL as network intent', () => {
   assert.equal(hasNetworkIntent('xem giúp https://github.com/foo/bar/issues/12'), true);
@@ -17,4 +17,13 @@ test('prose alone is not a network signal', () => {
 
 test('keeps pure code tasks local', () => {
   assert.equal(hasNetworkIntent('fix the failing parser unit test'), false);
+});
+
+test('detects an explicit web request without a URL', () => {
+  for (const prompt of [
+    'search the web for the latest Node.js release',
+    'browse online docs for this SDK',
+    'tra cứu trên mạng tài liệu mới nhất',
+  ]) assert.equal(hasWebIntent(prompt), true, prompt);
+  assert.equal(hasWebIntent('fix the failing parser unit test'), false);
 });

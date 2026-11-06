@@ -1161,7 +1161,7 @@ export async function executeLsEmulation(
     const displayLines = isCapped ? lines.slice(0, MAX_LS_ITEMS) : lines;
     if (isCapped) {
       displayLines.push(
-        `... [Trimmed ${totalCount - MAX_LS_ITEMS} entries to protect the context window. Use the "list_files" tool to browse the filtered directory tree and save tokens]`,
+        `... [Trimmed ${totalCount - MAX_LS_ITEMS} entries to protect the context window. Pass a narrower directory path to see the rest]`,
       );
     }
 
@@ -1176,8 +1176,8 @@ export async function executeLsEmulation(
       exitCode: 0,
       emulated: true,
       suggestion: isCapped
-        ? 'Directory has many entries. For token efficiency and standard structure management, use the "list_files" tool.'
-        : 'Tip: for token efficiency and standard directory-tree management, use the dedicated "list_files" tool.',
+        ? 'Directory has many entries. Pass a narrower directory path to reduce output.'
+        : undefined,
     };
   } catch (err: any) {
     return {
@@ -1187,7 +1187,7 @@ export async function executeLsEmulation(
       durationMs: Date.now() - startTime,
       exitCode: 1,
       emulated: true,
-      suggestion: 'Check the directory path again or use the "list_files" tool.',
+      suggestion: 'Check the directory path again.',
     };
   }
 }
@@ -1315,7 +1315,7 @@ export function parseRmCommand(command: string): RmParsedOptions | null {
 export async function executeRmEmulation(
   parsed: RmParsedOptions,
   workspace: Workspace,
-): Promise<{ stdout: string; stderr: string; success: boolean; durationMs: number; exitCode: number; suggestion?: string }> {
+): Promise<{ stdout: string; stderr: string; success: boolean; durationMs: number; exitCode: number; suggestion?: string; filesDeleted: string[] }> {
   const startTime = Date.now();
   const deletedPaths: string[] = [];
   try {
@@ -1332,6 +1332,7 @@ export async function executeRmEmulation(
           durationMs: Date.now() - startTime,
           exitCode: 1,
           suggestion: 'Delete specific paths inside the workspace instead of the workspace root.',
+          filesDeleted: deletedPaths,
         };
       }
       if (workspace.isProtectedFile(safePath)) {
@@ -1342,6 +1343,7 @@ export async function executeRmEmulation(
           durationMs: Date.now() - startTime,
           exitCode: 1,
           suggestion: 'This file is in the workspace system-protection list and cannot be deleted.',
+          filesDeleted: deletedPaths,
         };
       }
 
@@ -1355,7 +1357,8 @@ export async function executeRmEmulation(
             success: false,
             durationMs: Date.now() - startTime,
             exitCode: 1,
-            suggestion: 'Check the file path again or use the dedicated "delete_file" tool.',
+            suggestion: 'Check the file path again, or pass -f to ignore missing files.',
+            filesDeleted: deletedPaths,
           };
         }
         continue;
@@ -1374,7 +1377,8 @@ export async function executeRmEmulation(
       success: true,
       durationMs: Date.now() - startTime,
       exitCode: 0,
-      suggestion: 'Tip: use the dedicated "delete_file" tool directly (cross-platform, hash-safe, <2ms) for optimization.',
+      suggestion: undefined,
+      filesDeleted: deletedPaths,
     };
   } catch (err: any) {
     return {
@@ -1383,6 +1387,7 @@ export async function executeRmEmulation(
       success: false,
       durationMs: Date.now() - startTime,
       exitCode: 1,
+      filesDeleted: deletedPaths,
     };
   }
 }
@@ -1409,13 +1414,13 @@ export function resolveRunCommandTimeout(requestedMs: unknown, configuredDefault
 export function createRunCommandTool(sandboxManager?: SandboxManager, taskManager?: TaskManager, permissionManager?: any): ToolDefinition {
   return {
     name: 'run_command',
-    description: 'Run terminal commands for builds, tests, linting, scripts, Git, and database operations. Database access & CLI management: Use run_command to connect, inspect, query, migrate, and manage databases. Discovery: extract connection parameters from project environment/config files (.env, docker-compose.yml) or the user prompt. Execution hierarchy: 1) Docker-First: when database services run in Docker, prioritize `docker exec -i <container_name> <cli> ...` (e.g. `docker exec -i postgres psql -U ... -d ... -c \"...\"`) to use preinstalled container binaries; 2) Native/Isolated CLI: use local/sandbox database tools (`psql`, `mysql`, `sqlite3`, `mongosh`, `redis-cli`) directly. Credential security: ALWAYS isolate passwords into temporary environment variables (e.g. `docker exec -i -e PGPASSWORD=...` or prefixing `PGPASSWORD=...`, `MYSQL_PWD=...`, `REDISCLI_AUTH=...`) rather than putting passwords in command arguments or URLs. Non-interactive policy: ALWAYS pass one-shot execution flags (`-c`, `-e`, `--eval`, or script pipes) — NEVER launch interactive shells/REPLs that wait for TTY stdin. Safety boundaries: Read-only operations (SELECT, SHOW, DESCRIBE, schema inspection) are permitted to answer queries; state modifications (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, migrations) and database backups (pg_dump, mysqldump, mongodump) MUST ONLY be executed when explicitly requested by the user. Test policy: NEVER modify test assertions to bypass failures — fix production logic instead; legitimate assertion upgrades must be done as a separate file edit before running tests, preserving or increasing assertion count. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation (ISOLATED_SANDBOX_REQUIRED) rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Allowlist groups (no approval): explore cat/type/head/tail/ls/dir/grep/rg/find/jq, build/test npm/node/npx/bun/python/pytest/dotnet/go/cargo/tsc/eslint/prettier/jest/vitest, lint/format biome/oxlint/stylelint/ruff/black/isort/flake8/mypy/pylint/gofmt/rustfmt/rubocop/phpcs/ktlint/swiftlint/clang-format, git read/write subcommands, docker ps/images. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines (exactly two allowlisted segments, no redirect/substitution, skips approval). Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Single cat/ls/sed/rg calls are auto-emulated via Node.js I/O (<5ms); missing binaries fail fast with a fallback/install hint and auto-provision when a recipe exists. Output is sanitized, test-distilled, truncated (~8000 chars, stderr ~4000) with the full log offloaded to logFilePath: always check exitCode/success/commandOutcome plus logFilePath and verificationOutputComplete before concluding. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with the task manager (explicit long timeouts auto-promote to background after ~10s soft-timeout). Shell cwd/env persists across calls (cd/export stick); repo .minus/hooks.json may add denials; secrets are scrubbed/redacted; idle background tasks emit a one-shot stall notice. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. For repository code and file edits, prefer dedicated file tools (`list_files`, `search_text`, `read_file`, `write_file`); for databases, container CLI, external APIs, and system diagnostics, use run_command directly. File deletions go through `delete_file`; never use shell `rm` for workspace files. For moves/renames run `mv`/`Move-Item` through this tool (approval may be required). Set `shell: "powershell"` to run a single command under PowerShell instead of the default host shell (quoted strings, `$` and `&` are then safe as written; PowerShell 5.1 has no `&&`, and it is unavailable under Docker isolation). Never include secrets or tokens in commands.',
+    description: 'Run terminal commands for builds, tests, linting, scripts, Git, and database operations. Database access & CLI management: Use run_command to connect, inspect, query, migrate, and manage databases. Discovery: extract connection parameters from project environment/config files (.env, docker-compose.yml) or the user prompt. Execution hierarchy: 1) Docker-First: when database services run in Docker, prioritize `docker exec -i <container_name> <cli> ...` (e.g. `docker exec -i postgres psql -U ... -d ... -c \"...\"`) to use preinstalled container binaries; 2) Native/Isolated CLI: use local/sandbox database tools (`psql`, `mysql`, `sqlite3`, `mongosh`, `redis-cli`) directly. Credential security: ALWAYS isolate passwords into temporary environment variables (e.g. `docker exec -i -e PGPASSWORD=...` or prefixing `PGPASSWORD=...`, `MYSQL_PWD=...`, `REDISCLI_AUTH=...`) rather than putting passwords in command arguments or URLs. Non-interactive policy: ALWAYS pass one-shot execution flags (`-c`, `-e`, `--eval`, or script pipes) — NEVER launch interactive shells/REPLs that wait for TTY stdin. Safety boundaries: Read-only operations (SELECT, SHOW, DESCRIBE, schema inspection) are permitted to answer queries; state modifications (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE, migrations) and database backups (pg_dump, mysqldump, mongodump) MUST ONLY be executed when explicitly requested by the user. Test policy: NEVER modify test assertions to bypass failures — fix production logic instead; legitimate assertion upgrades must be done as a separate file edit before running tests, preserving or increasing assertion count. Use execution_target="auto" by default: it prefers the isolated Internal (sandbox) environment when available. This does not guarantee every command runs in the sandbox; guardrails may reject commands that require isolation (ISOLATED_SANDBOX_REQUIRED) rather than silently running them on the Host. Choose execution_target="host" (External, the user\'s host machine) only when a host-native toolchain/dependency is needed or the sandbox is incompatible. For private GitHub clone/fetch, explicitly use host so Git can access the host Git Credential Manager; sign in to GCM separately. Public Git operations can use auto. Host commands remain subject to host policy, the allowlist, and approval; policy may still reject a command after approval. Allowlist groups (no approval): explore cat/type/head/tail/ls/dir/grep/rg/find/jq, build/test npm/node/npx/bun/python/pytest/dotnet/go/cargo/tsc/eslint/prettier/jest/vitest, lint/format biome/oxlint/stylelint/ruff/black/isort/flake8/mypy/pylint/gofmt/rustfmt/rubocop/phpcs/ktlint/swiftlint/clang-format, git read/write subcommands, docker ps/images. For short dependent command chains, use `&&`; use `||` only for intentional fallback and `|` for bounded-output pipelines (exactly two allowlisted segments, no redirect/substitution, skips approval). Avoid unrelated command chains, shell grouping/subshells, and command substitution; complex shell syntax and commands outside the allowlist may require approval. Single cat/ls/sed/rg calls are auto-emulated via Node.js I/O (<5ms); missing binaries fail fast with a fallback/install hint and auto-provision when a recipe exists. Output is sanitized, test-distilled, truncated (~8000 chars, stderr ~4000) with the full log offloaded to logFilePath: always check exitCode/success/commandOutcome plus logFilePath and verificationOutputComplete before concluding. Use `timeout_ms` for finite long-running commands; run servers/watchers/daemons with `WaitMsBeforeAsync` and monitor them with the task manager (explicit long timeouts auto-promote to background after ~10s soft-timeout). Shell cwd/env persists across calls (cd/export stick); repo .minus/hooks.json may add denials; secrets are scrubbed/redacted; idle background tasks emit a one-shot stall notice. Sensitive operations such as Git mutations must match the user\'s direct request; stage only explicit paths; pushes to main/master require approval and remain subject to Git policy. System-destructive commands are prohibited even with approval. For repository code and file edits, use `read_file`/`replace_text`/`write_file`; for search and listing use `rg -n`/`rg --files`/`ls`/`dir` with this tool. File deletions use `rm`/`del` (auto-emulated; approval may be required). For moves/renames run `mv`/`Move-Item` through this tool (approval may be required). Set `shell: "powershell"` to run a single command under PowerShell instead of the default host shell (quoted strings, `$` and `&` are then safe as written; PowerShell 5.1 has no `&&`, and it is unavailable under Docker isolation). Never include secrets or tokens in commands.',
     parameters: {
       type: Type.OBJECT,
       properties: {
         command: {
           type: Type.STRING,
-          description: 'Use for build, test, lint, script, Git, and database commands. Database operations: prioritize `docker exec -i` when containerized, isolate credentials via env vars (PGPASSWORD, MYSQL_PWD, REDISCLI_AUTH), use non-interactive one-shot flags, and only execute mutations or backups when explicitly requested by the user. Standard database patterns: PostgreSQL: `PGPASSWORD=secret psql -h localhost -U user -d db -c \"SELECT 1;\"` or `docker exec -i -e PGPASSWORD=secret <container> psql -U user -d db -c \"SELECT 1;\"` (backup: `PGPASSWORD=secret pg_dump -h localhost -U user -d db > backup.sql`); MySQL: `MYSQL_PWD=secret mysql -h 127.0.0.1 -u user db -e \"SHOW TABLES;\"` or `docker exec -i -e MYSQL_PWD=secret <container> mysql -u user db -e \"SHOW TABLES;\"` (backup: `MYSQL_PWD=secret mysqldump -u user db > backup.sql`); SQLite: `sqlite3 db.sqlite \".tables\"` or `sqlite3 db.sqlite \"SELECT * FROM users;\"` (backup: `sqlite3 db.sqlite \".dump\" > backup.sql`); MongoDB: `mongosh --host localhost:27017 -u user --eval \"db.stats()\"` or `docker exec -i <container> mongosh --eval \"db.getCollectionNames()\"`; Redis: `REDISCLI_AUTH=secret redis-cli -h localhost -p 6379 ping` or `docker exec -i -e REDISCLI_AUTH=secret <container> redis-cli info`. Default to `auto` (prefers the isolated Internal/sandbox environment when available). For a private GitHub clone/fetch, choose `execution_target: "host"` (External) to use the host Git Credential Manager; public Git can use auto. Never put credentials in Git URLs or commands. Host commands remain subject to host policy, the allowlist, and approval. The runtime enforces the allowlist (explore/build/test/git/docker-read groups); this schema lists groups, not every binary. Commands outside the allowlist may require approval and can still be rejected by policy. For repository code, prefer dedicated tools (`list_files`, `search_text`, `read_file`); for databases, container CLI, system state, and diagnostics, use run_command directly; never use shell `mv` for workspace files; moves and deletes go through the file-mutation tools with source and target paths. cat/ls/sed/rg single calls are auto-emulated (<5ms) so they work cross-platform, but dedicated tools save tokens. Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded-output `|` pipelines (two allowlisted segments only). Avoid unrelated chains, subshells/grouping, and `$()`; interactive REPL/vim and complex commands may require approval or are blocked by preflight. Large output is truncated with logFilePath: read it via read_file instead of re-running. Use `timeout_ms` for finite long-running builds/tests, and `WaitMsBeforeAsync` with the task manager for servers/watchers. Git mutations require explicit user request or approval; stage only explicit paths (`git add -- <paths>`, never -A/./wildcards unless the request is an explicit commit); pushes to main/master require approval; system-destructive commands are prohibited.',
+          description: 'Use for build, test, lint, script, Git, and database commands. Database operations: prioritize `docker exec -i` when containerized, isolate credentials via env vars (PGPASSWORD, MYSQL_PWD, REDISCLI_AUTH), use non-interactive one-shot flags, and only execute mutations or backups when explicitly requested by the user. Standard database patterns: PostgreSQL: `PGPASSWORD=secret psql -h localhost -U user -d db -c \"SELECT 1;\"` or `docker exec -i -e PGPASSWORD=secret <container> psql -U user -d db -c \"SELECT 1;\"` (backup: `PGPASSWORD=secret pg_dump -h localhost -U user -d db > backup.sql`); MySQL: `MYSQL_PWD=secret mysql -h 127.0.0.1 -u user db -e \"SHOW TABLES;\"` or `docker exec -i -e MYSQL_PWD=secret <container> mysql -u user db -e \"SHOW TABLES;\"` (backup: `MYSQL_PWD=secret mysqldump -u user db > backup.sql`); SQLite: `sqlite3 db.sqlite \".tables\"` or `sqlite3 db.sqlite \"SELECT * FROM users;\"` (backup: `sqlite3 db.sqlite \".dump\" > backup.sql`); MongoDB: `mongosh --host localhost:27017 -u user --eval \"db.stats()\"` or `docker exec -i <container> mongosh --eval \"db.getCollectionNames()\"`; Redis: `REDISCLI_AUTH=secret redis-cli -h localhost -p 6379 ping` or `docker exec -i -e REDISCLI_AUTH=secret <container> redis-cli info`. Default to `auto` (prefers the isolated Internal/sandbox environment when available). For a private GitHub clone/fetch, choose `execution_target: "host"` (External) to use the host Git Credential Manager; public Git can use auto. Never put credentials in Git URLs or commands. Host commands remain subject to host policy, the allowlist, and approval. The runtime enforces the allowlist (explore/build/test/git/docker-read groups); this schema lists groups, not every binary. Commands outside the allowlist may require approval and can still be rejected by policy. For repository code, use `read_file` plus run_command (`rg -n` to search contents, `rg --files`/`ls`/`dir` to list); for databases, container CLI, system state, and diagnostics, use run_command directly. cat/ls/sed/rg/rm single calls are auto-emulated (<5ms) so they work cross-platform; `rm`/`del` still require approval. Use one command or a short dependent chain with `&&`; use `||` only for intentional fallback and bounded-output `|` pipelines (two allowlisted segments only). Avoid unrelated chains, subshells/grouping, and `$()`; interactive REPL/vim and complex commands may require approval or are blocked by preflight. Large output is truncated with logFilePath: read it via read_file instead of re-running. Use `timeout_ms` for finite long-running builds/tests, and `WaitMsBeforeAsync` with the task manager for servers/watchers. Git mutations require explicit user request or approval; stage only explicit paths (`git add -- <paths>`, never -A/./wildcards unless the request is an explicit commit); pushes to main/master require approval; system-destructive commands are prohibited.',
         },
         CommandLine: {
           type: Type.STRING,
@@ -1970,6 +1975,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           success: emulatedRm.success,
           emulated: true,
           suggestion: emulatedRm.suggestion,
+          filesDeleted: emulatedRm.filesDeleted,
         };
       }
 
@@ -2110,6 +2116,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
               success: emulatedRm.success,
               emulated: true,
               suggestion: emulatedRm.suggestion,
+              filesDeleted: emulatedRm.filesDeleted,
             });
           }
         }
@@ -2353,6 +2360,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                     success: emulatedRm.success,
                     emulated: true,
                     suggestion: emulatedRm.suggestion,
+                    filesDeleted: emulatedRm.filesDeleted,
                   });
                 });
                 return;

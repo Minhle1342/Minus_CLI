@@ -443,5 +443,35 @@ describe('AgentLoop Bug Fixes Verification', () => {
       await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
     }
   });
+
+  it('declares the 4 core tools locally and adds web tools only on web intent', async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'tool-gate-'));
+    const declared: string[][] = [];
+    const runTurn = async (prompt: string) => {
+      declared.length = 0;
+      const llm = {
+        async generate(_session: Session, tools: any[] = []) {
+          declared.push(tools.map((tool) => tool.name));
+          return { text: 'Done.', toolCalls: [] };
+        },
+      };
+      const loop = new AgentLoop(llm as any, new ToolRegistry(), { workspace: new Workspace(rootDir) });
+      const session = new Session(`tool-gate-${prompt.length}`);
+      session.addUserMessage(prompt);
+      await loop.run(session);
+      return declared[0];
+    };
+
+    try {
+      assert.deepEqual(await runTurn('fix the failing parser unit test'), [
+        'read_file', 'replace_text', 'run_command', 'write_file',
+      ]);
+      assert.deepEqual(await runTurn('search the web for the latest Node.js docs'), [
+        'read_file', 'replace_text', 'run_command', 'web_fetch', 'web_search', 'write_file',
+      ]);
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
 });
 

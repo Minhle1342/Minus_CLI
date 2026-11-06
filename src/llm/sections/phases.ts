@@ -10,16 +10,16 @@ import { resolveVerifyPlaybookPrompt } from './tools.js';
 export const SECTION_PHASE_EXPLORE_GUIDANCE = `📍 [PHASE: EXPLORE (EVIDENCE-ADAPTIVE INVESTIGATION)]:
 - Goal: Reduce uncertainty until the available evidence is strong enough for the cost and reversibility of the next action.
 - Tool Strategy by Use Case:
-  * Structure & Layout: Use \`list_files\` to explore directory layout.
+  * Structure & Layout: Use \`run_command\` (\`ls\`, \`dir\`, \`rg --files\`) to explore directory layout.
   * Search & Runtime: Use \`run_command\` (with ripgrep/grep or git log) to find symbols, or to query databases, containers, and environment CLI.
   * Source Inspection: Use \`read_file\` to examine exact lines and obtain contentHash.
-  * Parallel Inspection: Emit multiple read-only tool calls (read_file, list_files) in a single turn to run them concurrently in parallel.
+  * Parallel Inspection: Emit multiple read-only tool calls (read_file, run_command) in a single turn to run them concurrently in parallel.
 - Evidence Rule: Inspect the exact target before editing. High-risk bugfix/security changes need empirical reproduction; planned R3 refactors may proceed after target inspection.`;
 
 export const SECTION_PHASE_EXPLORE_READONLY_GUIDANCE = `📍 [PHASE: EXPLORE (READ-ONLY INVESTIGATION - R0 FAST PATH)]:
 - Goal: Gather relevant context and directly answer or explain with zero mutation risk.
 - Tool Strategy:
-  * Structure: Use \`list_files\` to explore directory layout.
+  * Structure: Use \`run_command\` (\`ls\`, \`dir\`, \`rg --files\`) to explore directory layout.
   * Source Inspection: Use \`read_file\` to examine exact lines.
   * Search & Runtime: Use \`run_command\` to search codebase, query databases, or inspect container state.
 - Read-Only Rule: Answer directly once context is understood. No mutation or test execution required.`;
@@ -27,7 +27,7 @@ export const SECTION_PHASE_EXPLORE_READONLY_GUIDANCE = `📍 [PHASE: EXPLORE (RE
 export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DECOMPOSITION)]:
 - Goal: Survey codebase and plan surgical changes.
 - Read-Only Scope: Survey and plan ONLY — no edits or premature mutations.
-- Tools: Use \`list_files\` and \`read_file\` to confirm configurations, types, and logic before modifying.`;
+- Tools: Use \`run_command\` and \`read_file\` to confirm configurations, types, and logic before modifying.`;
 
 export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED COHERENT MUTATION)]:
 - Goal: Apply minimal, surgical code modifications strictly restoring the intended invariant.

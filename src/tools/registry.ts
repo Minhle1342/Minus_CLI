@@ -29,19 +29,24 @@ export interface ToolProvider {
 }
 
 /**
- * 9 canonical core tools exposed to LLM:
- * read_file, write_file, replace_text, list_files, search_text, run_command, web_search, web_fetch, delete_file.
+ * 4 canonical core tools exposed to LLM on ordinary turns:
+ * run_command, read_file, replace_text, write_file.
+ * Discovery (ls/dir/rg), verification and deletion (rm/del) reuse run_command.
  */
 export const CANONICAL_MODEL_TOOL_NAMES = new Set([
-  'read_file',
-  'write_file',
-  'replace_text',
-  'list_files',
-  'search_text',
   'run_command',
+  'read_file',
+  'replace_text',
+  'write_file',
+]);
+
+/**
+ * Tools that stay registered and retrievable but are only added to the model
+ * schema when the user prompt matches their intent gate (web / delegation).
+ */
+export const INTENT_GATED_MODEL_TOOL_NAMES = new Set([
   'web_search',
   'web_fetch',
-  'delete_file',
 ]);
 
 /**
@@ -56,6 +61,9 @@ export const MODEL_HIDDEN_TOOL_NAMES = new Set([
   'multi_replace_file_content',
   'create_file',
   'search_codebase_fast',
+  'list_files',
+  'search_text',
+  'delete_file',
 ]);
 
 /**
@@ -74,13 +82,18 @@ export const TOOL_ALIASES: Record<string, string> = {
   create_file: 'write_file',
   replace_file_content: 'replace_text',
   multi_replace_file_content: 'replace_text',
-  search_codebase_fast: 'search_text',
-  tools_search: 'search_text',
+  search_codebase_fast: 'run_command',
+  tools_search: 'run_command',
+  list_files: 'run_command',
+  search_text: 'run_command',
+  delete_file: 'run_command',
 };
 
 function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
   return tools.filter(
-    (tool) => (CANONICAL_MODEL_TOOL_NAMES.has(tool.name) || isOrchestrationTool(tool.name))
+    (tool) => (CANONICAL_MODEL_TOOL_NAMES.has(tool.name)
+      || INTENT_GATED_MODEL_TOOL_NAMES.has(tool.name)
+      || isOrchestrationTool(tool.name))
       && !MODEL_HIDDEN_TOOL_NAMES.has(tool.name)
       && !LAZY_TOOL_NAMES.has(tool.name)
   );
@@ -88,7 +101,7 @@ function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
 
 /**
  * ToolRegistry quản lý danh bạ các Tool có sẵn trong hệ thống Coding Agent.
- * Chỉ đăng ký và phơi bày 9 tool cốt lõi cho LLM.
+ * Chỉ đăng ký và phơi bày 4 tool cốt lõi cho LLM (web tools theo intent gate).
  */
 export class ToolRegistry implements ToolProvider {
   private tools = new Map<string, ToolDefinition>();
@@ -241,7 +254,7 @@ export class ToolRegistry implements ToolProvider {
 
   /**
    * Xuất danh sách schema FunctionDeclaration đầy đủ cho LLM.
-   * Luôn chỉ chứa 9 tool cốt lõi đã qua modelVisibleTools.
+   * Chỉ chứa tool đã qua modelVisibleTools (4 core + intent-gated).
    */
   getFunctionDeclarations(): FunctionDeclaration[] {
     return modelVisibleTools(this.getAll())

@@ -10,7 +10,7 @@ import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-r
 import { Session } from '../session/session.js';
 import { Workspace } from '../workspace/workspace.js';
 import { CriticGate } from './critic-gate.js';
-import { AgentLoop } from './agent-loop.js';
+import { AgentLoop, scopedMutationTargets } from './agent-loop.js';
 import { ClassificationEngine } from '../control/classification-engine.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { PlanManager } from './plan-manager.js';
@@ -372,6 +372,13 @@ test('/no-verify marker exempts tests regardless of phrasing', () => {
   assert.equal(isUserExplicitlyExemptingTests('fix the bug, no test required'), true);
   assert.equal(isUserExplicitlyExemptingTests('fix the bug'), false);
   assert.equal(isUserExplicitlyExemptingTests(undefined), false);
+});
+
+test('shell rm is tracked as mutation evidence and a checkpoint target', () => {
+  assert.equal(hasObservedMutation('run_command', { success: true, filesDeleted: ['tmp/a.ts'] }), true);
+  assert.equal(hasObservedMutation('run_command', { success: true, filesDeleted: [] }), false);
+  assert.deepEqual(scopedMutationTargets('run_command', { command: 'rm -f tmp/a.ts' }), ['tmp/a.ts']);
+  assert.deepEqual(scopedMutationTargets('run_command', { command: 'npm test' }), []);
 });
 
 test('Evidence Gate does not trigger false positives on 0-file scripts, CommandLine, analysis, or negation', () => {

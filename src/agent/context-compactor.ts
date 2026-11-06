@@ -1629,7 +1629,7 @@ export class ContextCompactor {
             compressedPayload.archiveId = record.id;
             if (record.logPath) {
               compressedPayload.logPath = record.logPath;
-              compressedPayload.observationMask = `${compressedPayload.observationMask} [Spilled to: ${record.logPath} — Inspect via read_file, search_text, or head/tail/grep]`;
+              compressedPayload.observationMask = `${compressedPayload.observationMask} [Spilled to: ${record.logPath} — Inspect via read_file or run_command (head/tail/rg)]`;
             }
 
             return {

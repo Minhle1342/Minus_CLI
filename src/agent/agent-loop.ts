@@ -1,7 +1,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
-import { ToolRegistry, ToolScope, MODEL_HIDDEN_TOOL_NAMES, CANONICAL_MODEL_TOOL_NAMES } from '../tools/registry.js';
+import { ToolRegistry, ToolScope, MODEL_HIDDEN_TOOL_NAMES, CANONICAL_MODEL_TOOL_NAMES, INTENT_GATED_MODEL_TOOL_NAMES } from '../tools/registry.js';
 import { ToolProvider } from '../tools/registry.js';
 import { ToolRunner, type ToolExecutionResult } from '../tools/tool-runner.js';
 import { validateSchemaValue } from '../tools/schema-validator.js';
@@ -40,6 +40,7 @@ import { getTurnCompletionState, hasObservedMutation, observedMutationFiles, col
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
 import { FinalAnswerGuard, isCompletionStub, stripSystemPromptEcho, type FinalAnswerGuardDecision } from './final-answer-guard.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
+import { parseRmCommand } from '../tools/run-command.js';
 import { CompletionEvidenceGate, extractCommandString, isCompletionEvidenceGateEnabled, isToolResultFailure, isVerificationCommand, isUserExplicitlyExemptingTests, isNonExecutableFile, verificationCommandFor } from './completion-evidence.js';
 import { VerificationPolicy, isScratchPath, isCommentOnlyChange } from '../skills/verification-policy.js';
 import { shouldPersistReasoning } from './reasoning-persistence.js';
@@ -69,6 +70,7 @@ import { checkPhaseToolEffect, isOrchestrationTool } from '../control/phase-tool
 import { gatesFromPermissionManager, type GateReader, type FullAccessGate } from '../security/full-access-gates.js';
 import { ToolControlTelemetry } from '../control/tool-control-telemetry.js';
 import { isReadOnlyRequest } from '../control/request-intent.js';
+import { hasNetworkIntent, hasWebIntent } from '../control/network-intent.js';
 import { getOrCreateTypeScriptService, disposeSharedTypeScriptService } from '../tools/typescript-service.js';
 import type { VerificationFailureItem } from '../skills/verification-baseline.js';
 import { LatencyOrchestrator } from './latency-orchestrator.js';
@@ -184,6 +186,12 @@ export function isTestFailureRelatedToCurrentTurn(
 }
 
 export function scopedMutationTargets(toolName: string, args: Record<string, any>): string[] {
+  // Shell deletion rewrites file state just like delete_file; its targets must
+  // reach the checkpoint/domain guards before the command runs.
+  if (toolName === 'run_command') {
+    const command = String(args?.command ?? args?.CommandLine ?? args?.commandLine ?? args?.cmd ?? '');
+    return parseRmCommand(command)?.targetPaths ?? [];
+  }
   if (!isMutationTool(toolName)) return [];
   const targets = new Set<string>();
   const add = (value: unknown) => { if (typeof value === 'string' && value.trim()) targets.add(value.trim()); };
@@ -1825,12 +1833,14 @@ export class AgentLoop {
         const stepCompletionState = getTurnCompletionState(session, turn);
 
         let activeToolDeclarations: any[];
+        const wantsWeb = hasWebIntent(turnUserRequest) || hasNetworkIntent(turnUserRequest);
+        const wantsDelegation = classification.requiredCapabilities.includes('delegate');
         const breakerSignature = Array.from(this.circuitBreakerTrippedTools).sort().join(',');
         // P1.4 cache key must include the gate surface, not just the phase: the gate
         // denies by risk/reversibility/task class, which can change inside one phase.
         // A stale hit would keep both the old schema AND the old runtime authorization
         // (runtime scope unions declarations at ~line 1936).
-        const toolGateSignature = `${hashAllowedToolSet(gateToolSurface.authorizedToolNames)}:${hashAllowedToolSet(gateToolSurface.visibleToolNames)}`;
+        const toolGateSignature = `${hashAllowedToolSet(gateToolSurface.authorizedToolNames)}:${hashAllowedToolSet(gateToolSurface.visibleToolNames)}:${wantsWeb ? 'web' : 'local'}:${wantsDelegation ? 'delegate' : 'solo'}`;
         if (hasSubmittedSolution) {
           // Post-Submission Tool Stripping: Khi đã submit_solution thành công, tước bỏ toàn bộ tools để model chỉ sinh text thuần
           activeToolDeclarations = [];
@@ -1883,10 +1893,25 @@ export class AgentLoop {
           }
 
           // Filter out orchestration tools if turn has no delegation intent (saves ~8,000 tokens)
-          if (!classification.requiredCapabilities.includes('delegate')) {
+          if (!wantsDelegation) {
             activeToolDeclarations = activeToolDeclarations.filter(
               (tool: any) => !isOrchestrationTool(tool.name),
             );
+          }
+
+          // Intent-gated web tools: only declare them when the prompt asks for the
+          // web or contains a URL. Offline code turns keep the 4-tool core schema.
+          if (!wantsWeb) {
+            activeToolDeclarations = activeToolDeclarations.filter(
+              (tool: any) => !INTENT_GATED_MODEL_TOOL_NAMES.has(tool.name),
+            );
+          } else {
+            for (const name of INTENT_GATED_MODEL_TOOL_NAMES) {
+              if (activeToolDeclarations.some((tool: any) => tool.name === name)) continue;
+              const tool = candidateProvider.get(name);
+              if (!tool) continue;
+              activeToolDeclarations.push({ name: tool.name, description: tool.description, parameters: tool.parameters });
+            }
           }
 
           // Strict filter: never declare compatibility aliases or hidden tools to model
@@ -2574,12 +2599,12 @@ export class AgentLoop {
         const trimmedRepositoryContext = isHighHistoryPressure ? '' : repositoryContext;
         const trimmedHarnessGuidance = isHighHistoryPressure
           ? (classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
-            ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or search_text/read_file to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
+            ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or run_command (rg -n)/read_file to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
             : undefined)
           : [
             promptDecision.harnessGuidance,
             classification.reasonCodes.includes('SYMBOL_TOPOLOGY_EXPLORATION_REQUIRED')
-              ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or search_text/read_file to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
+              ? '💡 [GITNEXUS TOPOLOGY GUIDANCE]: The user query explores specific symbols. Use GitNexus tools (context({name: "symbolName"}), query) or run_command (rg -n)/read_file to inspect 360-degree callers and callees before concluding, avoiding single-file confirmation bias.'
               : undefined,
           ].filter(Boolean).join('\n');
 
@@ -5073,7 +5098,7 @@ export class AgentLoop {
               );
               const noteText = hasSubmittedSolution
                 ? `[SYSTEM FINAL RESPONSE]: submit_solution was accepted. Call no further tools. Return the submitted answer in the user's language and at the requested level of detail. Include only findings and verification actually established. Do not invent code changes, tests, or root causes.`
-                : '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, search_text, replace_text, run_command) or concluding the task with a final answer.';
+                : '[SYSTEM NOTE]: Your last turn produced an empty response with no tool calls and no text. Please continue solving the user request by calling the appropriate tool (e.g. read_file, replace_text, run_command) or concluding the task with a final answer.';
               session.addUserMessage(noteText);
               await this.persistSession(session);
             }

@@ -103,26 +103,24 @@ test('multi-file search reads the best candidate and unavailable tools fail open
 
   const unavailable = decideReliableToolRoute({
     userRequest: 'understand auth flow',
-    visibleToolNames: ['run_command'],
+    visibleToolNames: [],
   });
   assert.equal(unavailable.selectedTool, undefined);
   assert.equal(unavailable.failOpen, true);
   assert.equal(unavailable.constrainSafe, false);
 
   const declarations = [
-    { name: 'search_text' },
-    { name: 'list_files' },
+    { name: 'run_command' },
     { name: 'read_file' },
     { name: 'replace_text' },
-    { name: 'run_command' },
+    { name: 'write_file' },
   ];
   const enforced = applyReliableToolRouteToDeclarations(declarations, multi, 'enforce');
   assert.deepEqual(enforced.map((tool) => tool.name), [
-    'search_text',
-    'list_files',
+    'run_command',
     'read_file',
     'replace_text',
-    'run_command',
+    'write_file',
   ]);
   assert.equal(applyReliableToolRouteToDeclarations(declarations, unavailable, 'enforce').length, declarations.length);
   assert.equal(applyReliableToolRouteToDeclarations(declarations, multi, 'shadow').length, declarations.length);
@@ -131,14 +129,14 @@ test('multi-file search reads the best candidate and unavailable tools fail open
 test('advisor emits actionable reliable-retrieval guidance without removed graph tools', () => {
   const advisor = new ToolSynergyAdvisor();
   const first = advisor.advise({ activeTaskTitle: 'Understand authentication flow' });
-  assert.equal(first.suggestedTools[0], 'search_text');
+  assert.equal(first.suggestedTools[0], 'run_command');
   assert.match(first.guidance, /broad_discovery/);
 
   const afterOutline = advisor.advise({
     lastToolName: 'read_file',
     lastToolResult: { path: 'src/auth.ts', symbols: [{ name: 'authenticate', qualifiedName: 'Auth.authenticate' }] },
   });
-  assert.equal(afterOutline.suggestedTools[0], 'search_text');
+  assert.equal(afterOutline.suggestedTools[0], 'run_command');
   assert.match(afterOutline.guidance, /Auth\.authenticate/);
 });
 
@@ -149,7 +147,7 @@ test('mode resolver and telemetry expose adoption, fallback, cycles, and transit
   const telemetry = new ReliableToolOrchestrationTelemetry();
   const discovery = decideReliableToolRoute({ userRequest: 'find parser' });
   telemetry.recordDecision(discovery);
-  telemetry.recordExecution(discovery, 'search_text', {});
+  telemetry.recordExecution(discovery, 'run_command', {});
   const ready = decideReliableToolRoute({ lastToolName: 'read_file', lastToolResult: { symbol: 'parse', path: 'src/parser.ts' } });
   telemetry.recordDecision(ready);
   telemetry.recordExecution(ready, 'search_text', {});
@@ -240,11 +238,10 @@ test('trajectory-aware cycle detection breaks repeated 3x tool loops and ping-po
 
 test('Repoformer abstention gate locks broad discovery tools when evidence is sufficient', () => {
   const allTools = [
-    { name: 'search_text' },
-    { name: 'list_files' },
+    { name: 'run_command' },
     { name: 'read_file' },
     { name: 'replace_text' },
-    { name: 'run_command' },
+    { name: 'write_file' },
   ];
   const abstained = decideReliableToolRoute({
     evidenceSufficient: true,
@@ -254,18 +251,16 @@ test('Repoformer abstention gate locks broad discovery tools when evidence is su
   assert.equal(abstained.abstainRetrieval, true);
   assert.match(abstained.guidance, /Repoformer Abstention/i);
   const filtered = applyReliableToolRouteToDeclarations(allTools, abstained, 'enforce');
-  assert.equal(filtered.some((t) => t.name === 'search_text'), false);
-  assert.equal(filtered.some((t) => t.name === 'list_files'), false);
   assert.equal(filtered.some((t) => t.name === 'replace_text'), true);
+  assert.equal(filtered.some((t) => t.name === 'run_command'), true);
 });
 
 test('Repoformer abstention gate preserves read_file in fallbackTools during ready_for_mutation', () => {
   const allTools = [
-    { name: 'search_text' },
-    { name: 'list_files' },
+    { name: 'run_command' },
     { name: 'read_file' },
     { name: 'replace_text' },
-    { name: 'run_command' },
+    { name: 'write_file' },
   ];
   const abstained = decideReliableToolRoute({
     evidenceSufficient: true,

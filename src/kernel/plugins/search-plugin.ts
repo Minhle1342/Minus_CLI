@@ -20,7 +20,7 @@ MUST SEARCH:
 DO NOT SEARCH:
 - The user explicitly says not to browse or use the internet.
 - The answer is fully supported by workspace files, tool outputs already obtained, user-provided text, deterministic calculation, or stable general knowledge.
-- The task is about locating or understanding local code; use search_codebase_fast, search_text, and read_file instead.
+- The task is about locating or understanding local code; use run_command (rg -n) and read_file instead.
 - An identical search already returned sufficient evidence. Do not repeat it without changing the query or scope.
 
 HOW TO SEARCH:

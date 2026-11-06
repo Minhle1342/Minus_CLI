@@ -89,7 +89,7 @@ export const SECTION_ANTIGRAVITY_TOOLS = `### COMMAND & WEB RETRIEVAL TOOLCHAIN:
    - Web retrieval: Use web_search and web_fetch for third-party docs, APIs, and web inspection.`;
 
 export const SECTION_CODEBASE_INTELLIGENCE = `### CODEBASE & SYSTEM OPERATIONS:
-   - Workspace files: use list_files for directory layouts/globs (path "." for workspace root); use search_text ONLY to search inside file contents; inspect exact lines with read_file; edit with replace_text or write_file.
+   - Workspace files: use run_command for directory layouts/globs (\`rg --files\`, \`ls\`, \`dir\`) and to search inside file contents (\`rg -n\`); inspect exact lines with read_file; edit with replace_text or write_file.
    - Runtime, system & databases: use run_command freely for shell commands, container execution, database queries, network tools, build, and test verification at any step.`;
 
 export const SECTION_TOOL_PLAYBOOKS = `### TOOL SYNERGY PLAYBOOKS:

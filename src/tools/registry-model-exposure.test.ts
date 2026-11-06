@@ -35,12 +35,10 @@ test('ToolScope preserves the model exposure policy', () => {
   }
 });
 
-test('ToolRetriever keeps a workflow-complete core with 8 essential tools', () => {
+test('ToolRetriever keeps a workflow-complete core with 6 essential tools', () => {
   const registry = new ToolRegistry();
   assert.deepEqual(registry.getRetriever().getConfig().alwaysInclude, [
     'read_file',
-    'list_files',
-    'search_text',
     'replace_text',
     'write_file',
     'run_command',
@@ -52,11 +50,11 @@ test('ToolRetriever keeps a workflow-complete core with 8 essential tools', () =
   const codingNames = new Set(codingTools.map((tool) => tool.name));
   assert.equal(codingNames.has('replace_text'), true);
   assert.equal(codingNames.has('read_file'), true);
-  assert.equal(codingNames.has('search_text'), true);
+  assert.equal(codingNames.has('search_text'), false);
   assert.equal(codingNames.has('write_file'), true);
   assert.equal(codingNames.has('run_command'), true);
-  assert.equal(codingNames.has('list_files'), true);
-  assert.ok(codingTools.length <= 8, `expected at most 8 schemas, received ${codingTools.length}`);
+  assert.equal(codingNames.has('list_files'), false);
+  assert.ok(codingTools.length <= 6, `expected at most 6 schemas, received ${codingTools.length}`);
 
   const webNames = new Set(registry.getRelevantTools('research the latest Node.js documentation online').map((tool) => tool.name));
   assert.equal(webNames.has('web_search'), true);

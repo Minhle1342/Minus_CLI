@@ -96,6 +96,10 @@ export function observedMutationFiles(toolName: string, args: Record<string, any
 }
 
 export function hasObservedMutation(toolName: string, result: Record<string, any>): boolean {
+  // Shell deletion (rm/del) mutates the workspace like delete_file.
+  if (toolName === 'run_command') {
+    return !toolResultFailed(result) && Array.isArray(result.filesDeleted) && result.filesDeleted.length > 0;
+  }
   // Inspection and reporting tools can describe changed files without changing them.
   if (!FILE_MUTATION_TOOLS.has(toolName) && toolName !== 'apply_patch' && toolName !== 'move_file' && result.mutationApplied !== true) return false;
   if (toolResultFailed(result) || result.changed === false || result.noChanges === true || result.rolledBack === true) return false;

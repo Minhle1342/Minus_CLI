@@ -352,7 +352,7 @@ export const readFileTool: ToolDefinition = {
           suggestions: suggestions.length > 0 ? suggestions : undefined,
           suggestionText: suggestions.length > 0
             ? `File does not exist. Available files in workspace: ${suggestions.join(', ')}`
-            : 'File does not exist. Use search_codebase_fast or list_files to locate the correct path.',
+            : 'File does not exist. Use run_command (rg --files | rg <name>) to locate the correct path.',
         };
       }
 

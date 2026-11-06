@@ -170,6 +170,10 @@ export function classifyToolEvidence(
     if (/\bgit\s+(?:status|diff|log|show|branch|tag)\b/i.test(cmd)) {
       return ['inspection', 'git'];
     }
+    // Repository discovery through the shell is exploration evidence too.
+    if (/^\s*(?:rg|ripgrep|grep|findstr|find|ls|dir|get-childitem|gci)\b/i.test(cmd)) {
+      return ['inspection'];
+    }
     return ['other'];
   }
   if (toolName === 'manage_task') {

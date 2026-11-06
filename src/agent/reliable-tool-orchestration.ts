@@ -56,8 +56,7 @@ export interface ToolOrchestrationTelemetrySnapshot {
 }
 
 export const RELIABLE_CONTEXT_TOOL_NAMES = new Set([
-  'search_text',
-  'list_files',
+  'run_command',
   'read_file',
 ]);
 
@@ -76,17 +75,6 @@ export function applyReliableToolRouteToDeclarations<T extends { name: string }>
   if (mode !== 'enforce' || !decision.constrainSafe || decision.failOpen || !decision.selectedTool) return declarations;
 
   const allowedContextTools = new Set([decision.selectedTool, ...decision.fallbackTools]);
-
-  // Repoformer Abstention Gate: when evidence is sufficient or in mutation phase, strip broad discovery tools
-  if (decision.abstainRetrieval) {
-    allowedContextTools.delete('search_text');
-    allowedContextTools.delete('list_files');
-  }
-
-  // LATS Cycle break: prune cycling tool from allowed set
-  if (decision.cycleDetected && decision.selectedTool !== 'search_text') {
-    allowedContextTools.delete('search_text');
-  }
 
   const scoped = declarations.filter((tool) => !RELIABLE_CONTEXT_TOOL_NAMES.has(tool.name) || allowedContextTools.has(tool.name));
   return scoped.some((tool) => tool.name === decision.selectedTool) ? scoped : declarations;
@@ -121,7 +109,7 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
       return selectVisible(input, {
         stage: 'cycle_break',
         preferredTool: cycle.suggestedRecoveryTool,
-        fallbackTools: ['read_file', 'search_text'],
+        fallbackTools: ['read_file', 'run_command'],
         confidence: 'high',
         reasonCodes: ['SEMANTIC_CYCLE_DETECTED', cycle.reason],
         guidance: `[LATS Cycle Break] Repetitive tool loop detected (${cycle.pattern}). Pivot immediately to ${cycle.suggestedRecoveryTool} instead of repeating the same search.`,
@@ -139,7 +127,7 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
     return selectVisible(input, {
       stage: 'fallback',
       preferredTool: recoveryTool(lastToolName),
-      fallbackTools: ['search_text', 'read_file', 'list_files'],
+      fallbackTools: ['run_command', 'read_file'],
       confidence: 'medium',
       reasonCodes: ['LAST_TOOL_FAILED', 'FAIL_OPEN_RECOVERY'],
       guidance: 'The last retrieval step failed. Recover with an independent, focused search and preserve the full tool set if none is available.',
@@ -153,7 +141,7 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
       return selectVisible(input, {
         stage: 'symbol_context',
         preferredTool: 'read_file',
-        fallbackTools: ['search_text', 'list_files'],
+        fallbackTools: ['run_command'],
         suggestedArgs: { path: hit.path },
         confidence: 'high',
         reasonCodes: ['SEARCH_FOUND_SYMBOL', 'READ_BEFORE_BODY'],
@@ -165,7 +153,7 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
     return selectVisible(input, {
       stage: 'candidate_localization',
       preferredTool: 'read_file',
-      fallbackTools: ['search_text', 'list_files'],
+      fallbackTools: ['run_command'],
       suggestedArgs: paths[0] ? { path: paths[0] } : undefined,
       confidence: paths.length > 0 ? 'high' : 'low',
       reasonCodes: paths.length > 1 ? ['MULTI_FILE_CANDIDATES', 'READ_BEST_CANDIDATE'] : ['NO_EXACT_SYMBOL', 'BROADEN_QUERY'],
@@ -195,28 +183,26 @@ export function decideReliableToolRoute(input: ToolRouteInput): ToolRouteDecisio
     const candidate = firstOutlineSymbol(result);
     return selectVisible(input, {
       stage: 'candidate_localization',
-      preferredTool: 'search_text',
-      fallbackTools: ['read_file', 'list_files'],
-      suggestedArgs: candidate
-        ? { query: candidate, isRegex: false }
-        : input.userRequest?.trim() ? { query: input.userRequest.trim() } : undefined,
+      preferredTool: 'run_command',
+      fallbackTools: ['read_file'],
+      suggestedArgs: { command: candidate ? `rg -n "${candidate}" .` : 'rg -n "<symbol>" .' },
       confidence: candidate ? 'medium' : 'low',
       reasonCodes: candidate ? ['OUTLINE_FOUND_SYMBOL', 'LOCATE_EXACT_BODY'] : ['RANGE_READ_NO_SYMBOL', 'RELOCALIZE'],
       guidance: candidate
-        ? `The outline exposed ${candidate}. Locate its exact declaration with a focused search_text query before mutating.`
-        : 'A range read did not establish a unique symbol. Relocalize with a focused search_text query instead of scrolling through arbitrary line windows.',
+        ? `The outline exposed ${candidate}. Locate its exact declaration with run_command ("rg -n") before mutating.`
+        : 'A range read did not establish a unique symbol. Relocalize with run_command ("rg -n") instead of scrolling through arbitrary line windows.',
       constrainSafe: Boolean(candidate),
     });
   }
 
   return selectVisible(input, {
     stage: 'broad_discovery',
-    preferredTool: 'search_text',
-    fallbackTools: ['list_files', 'read_file'],
-    suggestedArgs: input.userRequest?.trim() ? { query: input.userRequest.trim() } : undefined,
+    preferredTool: 'run_command',
+    fallbackTools: ['read_file'],
+    suggestedArgs: { command: 'rg -n "<symbol>" .' },
     confidence: input.userRequest?.trim() ? 'medium' : 'low',
     reasonCodes: ['UNKNOWN_SCOPE', 'BROAD_TO_NARROW'],
-    guidance: 'Start with a focused repository search, then read the best candidate. Do not guess line ranges.',
+    guidance: 'Start with a focused repository search via run_command ("rg -n"), then read the best candidate. Do not guess line ranges.',
     constrainSafe: false,
   });
 }
@@ -241,7 +227,7 @@ function detectTrajectoryCycle(trajectory: TrajectoryStep[]): {
       detected: true,
       pattern: `${tool} x 3`,
       reason: 'REPEATED_IDENTICAL_TOOL_CALLS',
-      suggestedRecoveryTool: tool === 'search_text' ? 'read_file' : 'search_text',
+      suggestedRecoveryTool: tool === 'read_file' ? 'run_command' : 'read_file',
     };
   }
 
@@ -260,7 +246,7 @@ function detectTrajectoryCycle(trajectory: TrajectoryStep[]): {
     };
   }
 
-  return { detected: false, reason: '', suggestedRecoveryTool: 'search_text' };
+  return { detected: false, reason: '', suggestedRecoveryTool: 'run_command' };
 }
 
 export class ReliableToolOrchestrationTelemetry {
@@ -291,7 +277,7 @@ export class ReliableToolOrchestrationTelemetry {
     if (actualTool === decision.selectedTool) this.followed++;
     else if (decision.fallbackTools.includes(actualTool)) this.fallbackSelections++;
     if (this.previousTool === 'read_file' && actualTool === 'read_file' && !result?.symbol) this.exactBodyRoundTrips++;
-    if (decision.stage === 'ready_for_mutation' && RELIABLE_CONTEXT_TOOL_NAMES.has(actualTool) && actualTool !== 'read_file') {
+    if (decision.stage === 'ready_for_mutation' && ['search_text', 'list_files'].includes(actualTool)) {
       this.invalidCycles++;
     }
     this.previousTool = actualTool;
@@ -375,7 +361,7 @@ function firstOutlineSymbol(result: any): string | undefined {
 }
 
 function recoveryTool(lastToolName?: string): string {
-  return lastToolName === 'search_text' ? 'read_file' : 'search_text';
+  return lastToolName === 'run_command' ? 'read_file' : 'run_command';
 }
 
 function stringValue(value: unknown): string | undefined {

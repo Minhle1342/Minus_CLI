@@ -1,7 +1,7 @@
 import type { Workspace } from '../workspace/workspace.js';
 import type { Session } from '../session/session.js';
 import { collectCompletionObservations, getTurnCompletionState, type TurnCompletionState } from './completion-observations.js';
-import { CompletionEvidenceGate, isNonExecutableFile, isToolResultFailure, isUserExplicitlyExemptingTests, type CompletionEvidenceDecision } from './completion-evidence.js';
+import { CompletionEvidenceGate, extractCommandString, isNonExecutableFile, isToolResultFailure, isUserExplicitlyExemptingTests, type CompletionEvidenceDecision } from './completion-evidence.js';
 import { getOrCreateTypeScriptService, type DiagnosticItem } from '../tools/typescript-service.js';
 import type { HypothesisTracker } from './hypothesis-tracker.js';
 import type { DomainIntentGuardian } from './domain-intent-guardian.js';
@@ -63,6 +63,16 @@ function extractInspectedFilesFromSession(session: Session, turn?: number): Set<
     }
   }
   return inspected;
+}
+
+/** Shell discovery (rg/ls/find/git) is exploration evidence even without read_file. */
+function hasCommandInspectionEvidence(session: Session, turn?: number): boolean {
+  return collectCompletionObservations(session, turn).some((observation) => {
+    if (observation.toolName !== 'run_command' || isToolResultFailure(observation.payload)) return false;
+    const command = extractCommandString(observation.args, observation.payload);
+    return /^\s*(?:rg|ripgrep|grep|findstr|find|ls|dir|get-childitem|gci)\b/i.test(command)
+      || /\bgit\s+(?:status|diff|log|show)\b/i.test(command);
+  });
 }
 
 function extractModifiedFiles(session: Session, filesModified?: string[], turn?: number): Set<string> {
@@ -179,9 +189,9 @@ export class CriticGate {
 
     const inspectedFiles = extractInspectedFilesFromSession(session, params.turn);
     const nonScratchInspected = Array.from(inspectedFiles).filter((f) => !isScratchPath(f));
-    // Structural/call-graph tools no longer exist in the registry: only
-    // inspected source files count as exploration evidence.
-    const hasStructuralEvidence = false;
+    // Shell discovery (rg/ls/find/git) counts as exploration evidence; the
+    // registry no longer declares list_files/search_text.
+    const hasStructuralEvidence = hasCommandInspectionEvidence(session, params.turn);
     const isLeading = detectLeadingQuery(userRequest).isLeading;
     // Trigger on observable evidence instead of guessing the user's intent: the
     // answer makes code claims, or the turn already inspected/queried code.
@@ -280,7 +290,7 @@ export class CriticGate {
     if (isBugfixOrSecurity && isHighOrMediumRisk && !hasReproduction && nonScratchInspected.length < 2) {
       // Advisory only — no score deduction.
       reasons.push(
-        `CAUSAL_TRACE_UNVERIFIED: only ${nonScratchInspected.length} non-scratch file(s) inspected — check callers with search_text or reproduce with run_command instead of guessing. Single-file inspection accepted for now; confirm upstream impact before mutating high-risk code.`,
+        `CAUSAL_TRACE_UNVERIFIED: only ${nonScratchInspected.length} non-scratch file(s) inspected — check callers with run_command ("rg -n") or reproduce with run_command instead of guessing. Single-file inspection accepted for now; confirm upstream impact before mutating high-risk code.`,
       );
     }
 
@@ -324,7 +334,7 @@ export class CriticGate {
         `1. Inspect the target file (${targetFilePath}) with read_file to understand existing logic and exact line numbers.`,
         `2. For bugfixes, write a reproduction script (e.g. scratch/reproduce_issue.py) or execute a test command to establish reproduction proof.`,
         `3. Formulate and verify the causal hypothesis before applying mutations.`,
-        `4. Trace the causal lineage: inspect upstream callers, related tests, or config files with search_text/read_file, or run analysis/test commands via run_command to avoid tunnel vision.`,
+        `4. Trace the causal lineage: inspect upstream callers, related tests, or config files with run_command ("rg -n") / read_file, or run analysis/test commands via run_command to avoid tunnel vision.`,
       ].join('\n');
 
       remediationHint = reasons.join('; ');

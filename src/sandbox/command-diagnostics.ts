@@ -14,16 +14,16 @@ export interface CommandFailureDiagnostic {
 
 export const POSIX_TO_TOOL_SUGGESTIONS: Record<string, { tool: string; suggestion: string }> = {
   rm: {
-    tool: 'delete_file',
-    suggestion: 'POSIX command "rm" is unavailable on Windows shell. Use the dedicated "delete_file" tool (cross-platform, hash-safe, <2ms) to delete files or directories.',
+    tool: 'run_command',
+    suggestion: 'POSIX command "rm" is unavailable on this shell. Use run_command with "del"/"rmdir" (auto-emulated) or set shell to "powershell" (Remove-Item).',
   },
   cat: {
     tool: 'read_file',
     suggestion: 'POSIX command "cat" is unavailable on Windows shell. Use the dedicated "read_file" tool with "startLine"/"endLine" or "symbol".',
   },
   ls: {
-    tool: 'list_files',
-    suggestion: 'POSIX command "ls" is unavailable on Windows shell. Use the dedicated "list_files" tool to list directories.',
+    tool: 'run_command',
+    suggestion: 'POSIX command "ls" is unavailable on this shell. Use run_command with "dir" (auto-emulated) or set shell to "powershell" (Get-ChildItem).',
   },
   touch: {
     tool: 'create_file',
@@ -179,7 +179,7 @@ export function diagnoseCommandFailure(
         success: false,
         errorCode: 'PACKAGE_JSON_NOT_FOUND',
         diagnostic: 'No package.json file found in the execution directory.',
-        suggestion: 'If this project is a monorepo or multi-package repository, config files and scripts reside in subfolders (e.g. apps/<name>/package.json). Use "list_files" to inspect project structure, or run commands with workspace flags (e.g. "npm test --workspace=<app>").',
+        suggestion: 'If this project is a monorepo or multi-package repository, config files and scripts reside in subfolders (e.g. apps/<name>/package.json). Use run_command ("dir"/"ls") to inspect project structure, or run commands with workspace flags (e.g. "npm test --workspace=<app>").',
       };
     }
     return {

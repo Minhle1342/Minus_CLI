@@ -89,7 +89,7 @@ export function deterministicBlockFingerprint(
 
 export function deterministicRemediation(toolName: string, errorCode: string): string {
   if (toolName === 'run_command' && errorCode === 'ISOLATED_SANDBOX_REQUIRED') {
-    return 'Do not retry the same command with execution_target "auto". Either retry explicitly with execution_target "host" (host policy + approval still apply) or switch to a read-only tool (read_file/list_files/search_text).';
+    return 'Do not retry the same command with execution_target "auto". Either retry explicitly with execution_target "host" (host policy + approval still apply) or switch to a read-only action (read_file, or run_command with rg/ls).';
   }
   if (errorCode === 'TOOL_NOT_ALLOWED_THIS_TURN' || errorCode === 'PHASE_TOOL_EFFECT_BLOCKED') {
     return 'Pick an authorized tool for the current phase; do not repeat the denied call unchanged.';

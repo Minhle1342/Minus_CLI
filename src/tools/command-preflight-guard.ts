@@ -373,8 +373,8 @@ export function evaluateCommandPreflight(
           extractedEnv,
           reason: `[OBSERVE] Executable "${candidatePath}" does not exist on this host.${siblingSuggestion}`,
           suggestion: siblingSuggestion
-            ? `Check the actual executable or build configuration (e.g. run the Debug build instead of Release, or rebuild before running). Use the "list_files" tool to inspect the output directory.`
-            : `Binary or script "${candidatePath}" has not been built or does not exist. Build the project first or use "list_files" to verify the exact path.`,
+            ? `Check the actual executable or build configuration (e.g. run the Debug build instead of Release, or rebuild before running). Use run_command ("ls"/"dir") to inspect the output directory.`
+            : `Binary or script "${candidatePath}" has not been built or does not exist. Build the project first or use run_command ("ls"/"dir") to verify the exact path.`,
         };
       }
     }
@@ -439,7 +439,7 @@ export function evaluateCommandPreflight(
             extractedEnv,
             reason: `[OBSERVE] Workspace "${wsName}" was not found by the shallow workspace scan.`,
             suggestion: hasWorkspacesConfig
-              ? `Use the "list_files" tool to inspect the monorepo directories (e.g. apps/ or packages/) to find the correct workspace name.`
+              ? `Use run_command ("ls"/"dir") to inspect the monorepo directories (e.g. apps/ or packages/) to find the correct workspace name.`
               : `Drop the --workspace flag and run the command directly (e.g. "${pkgCmd.manager} ${pkgCmd.isRun ? 'run ' : ''}${pkgCmd.scriptName || 'test'}").`,
           };
         }

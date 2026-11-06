@@ -841,7 +841,7 @@ export function createWebSearchTool(options: WebSearchToolOptions = {}): ToolDef
             errorCode: 'ALL_WEB_SEARCH_PROVIDERS_UNAVAILABLE',
             searxngError: failures[0]?.error,
             fallbackError: fallbackRes.error,
-            hint: 'Verify internet connection, or start local SearXNG container on port 8080. If offline, use local code search tools (search_codebase_fast, search_text, read_file).',
+            hint: 'Verify internet connection, or start local SearXNG container on port 8080. If offline, use run_command (rg -n) and read_file.',
             retryable: true,
             queries,
             queryCount: queries.length,

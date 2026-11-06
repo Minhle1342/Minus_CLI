@@ -114,6 +114,16 @@ test('failed, cancelled, and still-running background tasks do not count as veri
   }
 });
 
+test('shell search and listing count as inspection evidence', () => {
+  for (const command of ['rg -n "foo" src', 'rg --files src', 'ls src', 'dir src']) {
+    assert.deepEqual(
+      classifyToolEvidence('run_command', { command }, { processStarted: true, exitCode: 0 }),
+      ['inspection'],
+      command,
+    );
+  }
+});
+
 test('run_command evidence requires a definite successful process outcome', () => {
   assert.deepEqual(classifyToolEvidence('run_command', { command: 'npm test' }, {
     command: 'npm test', processStarted: true,

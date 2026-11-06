@@ -208,13 +208,11 @@ test('batch delete preview lists every path in the pre-approval diff', async () 
   }
 });
 
-test('delete_file is registered in ToolRegistry and model declarations', () => {
+test('delete_file stays executable but is hidden from model declarations', () => {
   const registry = new ToolRegistry();
   assert.equal(registry.has('delete_file'), true);
-  const declarations = registry.getFunctionDeclarations();
-  const deleteDecl = declarations.find((d) => d.name === 'delete_file');
-  assert.ok(deleteDecl, 'delete_file must be exposed to model declarations');
-  assert.ok(deleteDecl?.parameters?.properties?.paths, 'must accept paths array');
+  assert.equal(registry.getFunctionDeclarations().some((d) => d.name === 'delete_file'), false);
+  assert.ok((registry.get('delete_file')?.parameters?.properties as any)?.paths, 'must accept paths array');
 });
 
 test('LoopProgressGuard detects repeated failed or no-op delete_file calls', () => {

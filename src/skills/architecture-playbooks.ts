@@ -33,7 +33,7 @@ RESPONSE STRUCTURE (loosely follow this conversational flow without markdown hea
 
 TONE & STYLE:
 - Reflective, curious, patient. Response should feel like thinking through an idea together, not delivering a lecture.
-- Concise: 4–8 short paragraphs, minimal or no jargon unless required.
+- Concise: 4â€“8 short paragraphs, minimal or no jargon unless required.
 - If the user expresses an incorrect belief: acknowledge reasoning, gently challenge the assumption, and guide toward a clearer interpretation.`;
 
 export const BUILTIN_ARCHITECTURE_PLAYBOOKS: Record<string, string> = {
@@ -54,7 +54,7 @@ export const BUILTIN_ARCHITECTURE_PLAYBOOKS: Record<string, string> = {
    - Single Responsibility: Each class/service owns one cohesive reason to change.
 
 3. **Blast Radius & Contract Preservation:**
-   - Before mutating exported functions, interfaces, or types, inspect all call-sites with \`search_text\` and \`read_file\`.
+   - Before mutating exported functions, interfaces, or types, inspect all call-sites with \`run_command\` (\`rg -n\`) and \`read_file\`.
    - Prefer additive, backward-compatible evolutionary extensions over breaking API mutations.
    - Mark deprecated symbols with clear migration paths before removing them.
 
@@ -122,7 +122,7 @@ export const BUILTIN_ARCHITECTURE_PLAYBOOKS: Record<string, string> = {
   'writing-plans': `### IMPLEMENTATION PLANNING & ATOMIC DECOMPOSITION PROTOCOL (WRITING-PLANS)
 1. **Scope & Architectural Foundations (Before Touching Code):**
    - Define the primary objective in one sentence, followed by architectural constraints, affected modules, and tech stack.
-   - Inspect existing files, interfaces, and dependencies with \`read_file\` / \`search_text\` before proposing any structural changes.
+   - Inspect existing files, interfaces, and dependencies with \`read_file\` and \`run_command\` (\`rg -n\`) before proposing any structural changes.
    - Maintain strict non-destructive changes and backward compatibility.
 
 2. **Bite-Sized Atomic Task Granularity (2-5 Minute Execution Steps):**

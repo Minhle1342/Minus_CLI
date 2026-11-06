@@ -73,8 +73,8 @@ export class ToolSynergyAdvisor {
     if (!lastToolName && detectBugReportIntent(userRequest)) {
       return {
         playbook: 'B_DEBUGGING',
-        guidance: `[ROOT-CAUSE:REPORT] User reported a bug or error. Do not guess or monkey-patch. Protocol: ${ROOT_CAUSE_STEPS} via search_text/read_file. Investigate in proportion to risk and pivot only after repeated equivalent failure or falling confidence.`,
-        suggestedTools: ['search_text', 'read_file', 'run_command'],
+        guidance: `[ROOT-CAUSE:REPORT] User reported a bug or error. Do not guess or monkey-patch. Protocol: ${ROOT_CAUSE_STEPS} via run_command (rg) / read_file. Investigate in proportion to risk and pivot only after repeated equivalent failure or falling confidence.`,
+        suggestedTools: ['run_command', 'read_file'],
       };
     }
 
@@ -165,7 +165,7 @@ export class ToolSynergyAdvisor {
         guidance: `[TOOL GUARDIAN ADVISORY]: Tool "${lastToolName || 'unknown'}" failed with ${guardianDiag.category}. ${guardianDiag.recoveryAction}`,
         suggestedTools: alternatives.length > 0
           ? alternatives
-          : ['run_command', 'read_file', 'search_text'],
+          : ['run_command', 'read_file'],
       };
     }
 
@@ -175,7 +175,7 @@ export class ToolSynergyAdvisor {
       return {
         playbook: 'B_DEBUGGING',
         guidance: `[LATS BACKTRACKING] Repeated repair attempts failed. Stop speculative edits and re-evaluate the causal hypothesis. Failures do not authorize Git restore, reset, stash or discarding workspace changes. Only use a rollback explicitly authorized for the affected scope.${memoText}`,
-        suggestedTools: ['run_command', 'read_file', 'search_text'],
+        suggestedTools: ['run_command', 'read_file'],
       };
     }
 
@@ -190,7 +190,7 @@ export class ToolSynergyAdvisor {
       return {
         playbook: 'B_DEBUGGING',
         guidance: `[ROOT-CAUSE:FAIL] Error or test failure detected. Never monkey-patch crash sites or repeat failing commands without revising the hypothesis. Protocol: ${ROOT_CAUSE_STEPS}.${graphTrace} Use the newest feedback to pivot after repeated equivalent failure.`,
-        suggestedTools: ['run_command', 'read_file', 'search_text', 'replace_text'],
+        suggestedTools: ['run_command', 'read_file', 'replace_text'],
       };
     }
 
@@ -199,7 +199,7 @@ export class ToolSynergyAdvisor {
     if (
       activeTaskTitle
       || userRequest
-      || ['search_text', 'read_file'].includes(lastToolName || '')
+      || ['run_command', 'search_text', 'read_file'].includes(lastToolName || '')
     ) {
       const route = decideReliableToolRoute({
         userRequest: userRequest || activeTaskTitle,
@@ -221,8 +221,8 @@ export class ToolSynergyAdvisor {
     // 6. Mặc định: Hướng dẫn chuỗi hành vi tổng quát
     return {
       playbook: 'GENERAL',
-      guidance: 'Explore with list_files and search_text, inspect implementation details with read_file, edit with replace_text or write_file, and verify with run_command.',
-      suggestedTools: ['list_files', 'search_text', 'read_file', 'replace_text', 'run_command'],
+      guidance: 'Explore workspace with run_command (ls, dir, rg), inspect implementation details with read_file, edit with replace_text or write_file, and verify with run_command.',
+      suggestedTools: ['run_command', 'read_file', 'replace_text', 'write_file'],
     };
   }
 
@@ -235,19 +235,20 @@ export class ToolSynergyAdvisor {
       return '';
     }
     const CANONICAL_VISIBLE_TOOLS = new Set([
+      'run_command',
       'read_file',
       'write_file',
       'replace_text',
-      'list_files',
-      'search_text',
-      'run_command',
       'web_search',
       'web_fetch',
-      'delete_file',
       'manage_task',
     ]);
     const ADVICE_TOOL_MAP: Record<string, string> = {
-      search_codebase_fast: 'search_text',
+      search_codebase_fast: 'run_command',
+      tools_search: 'run_command',
+      list_files: 'run_command',
+      search_text: 'run_command',
+      delete_file: 'run_command',
       write_to_file: 'write_file',
       create_file: 'write_file',
       replace_file_content: 'replace_text',
@@ -260,8 +261,8 @@ export class ToolSynergyAdvisor {
       read_compressed_code: 'read_file',
       get_symbol_context_360: 'read_file',
       get_diagnostics: 'run_command',
-      analyze_impact: 'search_text',
-      query_call_graph: 'search_text',
+      analyze_impact: 'run_command',
+      query_call_graph: 'run_command',
       apply_patch: 'replace_text',
     };
     const sanitizedTools = advice.suggestedTools

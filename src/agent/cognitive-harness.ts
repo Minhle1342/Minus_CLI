@@ -281,7 +281,7 @@ export class CognitiveHarness {
         ...scaffold.negativeGate,
       ],
       executionTopology: [
-        'Attachment Neighborhood Expansion: inspect hop-1 files (direct imports, importers, dir top-ranked files listed in [Attachment Neighborhood]) then hop-2 files (related to hop-1) with read_file / search_text before concluding.',
+        'Attachment Neighborhood Expansion: inspect hop-1 files (direct imports, importers, dir top-ranked files listed in [Attachment Neighborhood]) then hop-2 files (related to hop-1) with read_file and run_command (rg -n) before concluding.',
         ...scaffold.executionTopology,
       ],
     };
@@ -489,7 +489,7 @@ export class CognitiveHarness {
           '🔒 [PHASE LOCK: PLAN] NEVER attempt code mutations (DO NOT call replace_text or write_file) during the PLAN phase.',
           'NEVER fabricate mock test data inside production code.',
           'NEVER comment out or silence compiler/LSP diagnostics.',
-          'NEVER guess or hallucinate test commands or binary output paths without inspecting project manifests or confirming file existence with list_files.',
+          'NEVER guess or hallucinate test commands or binary output paths without inspecting project manifests or confirming file existence with run_command (ls/rg --files).',
         ];
 
         if (consecutiveFailures > 1) {
@@ -505,12 +505,12 @@ export class CognitiveHarness {
             : 'Formulate a comprehensive plan with atomic, ordered, testable steps before unlocking implementation.',
           falsificationCriteria: 'If the plan misses edge cases, architectural invariants, or verification steps, the plan is INCOMPLETE and must be refined before execution.',
           executionTopology: [
-            'Step 1 (Architectural Inspection): Inspect relevant files and references using read-only tools (read_file, list_files, search_text).',
+            'Step 1 (Architectural Inspection): Inspect relevant files and references using read-only tools (read_file, run_command with rg/ls).',
             'Step 2 (Scope & Dependency Mapping): Identify exact file boundaries, caller impact, and technical constraints.',
             'Step 3 (Plan Formalization): Outline ordered, atomic subtasks with concrete verification criteria directly in markdown.',
             'Step 4 (Phase Transition Readiness): Once plan is accepted and locked, transition to explore or implement phase.',
           ],
-          actionBoundary: 'Strictly READ-ONLY and PLANNING actions (read_file, list_files, search_text). Code editing tools are FORBIDDEN.',
+          actionBoundary: 'Strictly READ-ONLY and PLANNING actions (read_file, run_command with rg/ls). Code editing tools are FORBIDDEN.',
         };
       }
 
@@ -594,7 +594,7 @@ export class CognitiveHarness {
         'NEVER comment out or silence compiler/LSP diagnostics.',
         'NEVER modify production code blindly without inspecting actual lines with read_file first.',
         'NEVER attempt bugfix code changes without writing or running a reproduction test (Agentless reproduction protocol).',
-        'NEVER guess or hallucinate test commands or binary output paths without inspecting project manifests or confirming file existence with list_files.',
+        'NEVER guess or hallucinate test commands or binary output paths without inspecting project manifests or confirming file existence with run_command (ls/rg --files).',
         'NEVER declare victory without running empirical verification (e.g. npm run build / test).',
       ];
 
