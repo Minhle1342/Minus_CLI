@@ -1,4 +1,3 @@
-import { AdaptiveComputeController } from '../control-plane/reasoning/adaptive-compute-controller.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Session } from '../session/session.js';
@@ -145,26 +144,4 @@ test('Git capability recovery uses the available shell without expanding authori
   assert.match(result.continuationPrompt || '',/run_command/);
   assert.match(result.continuationPrompt || '',/user-authorized/);
   assert.doesNotMatch(result.continuationPrompt || '',/call the dedicated Git tools/);
-});
-
-
-test('latent adaptive compute reports observed pressure and deduplicates reevaluation', () => {
-  const controller = new AdaptiveComputeController();
-  assert.equal(controller.getState().pressure.taskRisk,0);
-  const pressure = {taskRisk:.8,uncertainty:.2,blastRadius:.1,failureCount:0,stagnationScore:0,hypothesisEntropy:0,verificationFailures:0};
-  assert.equal(controller.evaluatePressure(pressure).action,'ESCALATE');
-  assert.equal(controller.evaluatePressure({...pressure}).action,'MAINTAIN');
-  assert.deepEqual(controller.getState().pressure,pressure);
-  assert.equal(controller.evaluatePressure(pressure,{observationId:'new-risk-observation'}).action,'ESCALATE');
-  assert.equal(controller.evaluatePressure(pressure,{observationId:'new-risk-observation'}).action,'MAINTAIN');
-  const low = {...pressure,taskRisk:0};
-  assert.equal(controller.evaluatePressure(low).action,'MAINTAIN');
-  assert.equal(controller.evaluatePressure(low,{observationId:'verified-1',verificationSucceeded:true}).action,'DEESCALATE');
-  assert.equal(controller.evaluatePressure(low,{observationId:'verified-1',verificationSucceeded:true}).action,'MAINTAIN');
-  const observed = controller.getState();observed.pressure.taskRisk=1;
-  assert.equal(controller.getState().pressure.taskRisk,0);
-  controller.reset();
-  assert.equal(controller.getCurrentTier(),1);
-  assert.deepEqual(controller.getState().transitions,[]);
-  assert.equal(controller.getState().pressure.uncertainty,0);
 });

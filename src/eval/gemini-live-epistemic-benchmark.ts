@@ -1,10 +1,11 @@
-import dotenv from 'dotenv';
 import { performance } from 'node:perf_hooks';
 import { GoogleGenAI } from '@google/genai';
 import { EpistemicInvestigationEngine } from '../agent/epistemic-investigation-engine.js';
 import { ExactTokenizer } from '../agent/exact-tokenizer.js';
 
-dotenv.config();
+try {
+  process.loadEnvFile?.();
+} catch {}
 
 const MODEL_NAME = 'gemini-3.5-flash-lite';
 const apiKey = process.env.GEMINI_API_KEY;

@@ -1,4 +1,3 @@
-import dotenv from 'dotenv';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { BenchmarkRunner } from './benchmark-runner.js';
@@ -6,7 +5,9 @@ import { BENCHMARK_TASKS } from './benchmark-tasks.js';
 import type { BenchmarkTask, TaskEvaluationResult } from './types.js';
 import { StepPromptPolicy } from '../agent/step-prompt-policy.js';
 
-dotenv.config();
+try {
+  process.loadEnvFile?.();
+} catch {}
 
 const modelName = process.argv.find((arg) => arg.startsWith('--model='))?.slice('--model='.length)
   || 'gemini-3.7-flash';

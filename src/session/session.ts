@@ -128,6 +128,10 @@ export interface EffectState {
 export interface SessionEventData {
   content?: Content;
   messages?: Content[];
+  /** Set when a superseded compaction payload was dropped on load to reclaim RAM. */
+  messagesStripped?: boolean;
+  /** tool/result marker: rebuild a functionResponse during projection (payload lives in `result`). */
+  projectable?: boolean;
   source?: 'human' | 'system' | 'injected';
   inputId?: string;
   inputText?: string;
@@ -345,6 +349,18 @@ function assertEvent(event: SessionEvent, expectedSeq: number): void {
 }
 
 /**
+ * True when the newest compaction inside `events` no longer carries its
+ * snapshot. Replay before that point cannot be reconstructed, so a historical
+ * header past it must skip the digest comparison (its hash chain still holds).
+ */
+function replayBaseStripped(events: SessionEvent[]): boolean {
+  for (let index = events.length - 1; index >= 0; index--) {
+    if (events[index].type === 'session/compaction') return Boolean(events[index].data.messagesStripped);
+  }
+  return false;
+}
+
+/**
  * Event-sourced session.
  *
  * The event list is the durable source of truth. `getHistory()` is a
@@ -359,6 +375,8 @@ export class Session {
   private invariantCursor?: InvariantCheckCursor;
   private lastReplayVerifiedSeq = 0;
   private lastRecordedHeaderSeq = 0;
+  private projectionCache?: { length: number; entries: ProjectedMessageWithTurn[] };
+  private turnStateCache?: { length: number; completed: number[]; open?: number };
 
   constructor(
     id: string = `session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
@@ -399,25 +417,34 @@ export class Session {
   }
 
   recordRequestHeader(
-    input: Omit<RecordedRequestHeader, 'digest' | 'sourceEventSeq' | 'historyDigest' | 'historyMessages' | 'historyCharacters' | 'previousDigest'> & { history: Content[] },
+    input: Omit<RecordedRequestHeader, 'digest' | 'sourceEventSeq' | 'historyDigest' | 'historyMessages' | 'historyCharacters' | 'previousDigest' | 'systemPromptDigest' | 'toolsDigest'> & { history: Content[] },
     options: { compactHistory?: boolean; compaction?: RecordedRequestHeader['compaction'] } = {},
   ): SessionEvent {
-    const cloned = cloneJson(input);
-    const history = cloned.history || [];
-    const priorHeader = this.findLatestEventOfType('request/header', (event) => Boolean(event.data.requestHeader));
-    const priorDigest = priorHeader?.data.requestHeader?.digest;
+    // append() clones the event; `history` is hashed here, never stored.
+    const { history = [], ...rest } = input;
+    const prior = this.findLatestEventOfType('request/header', (event) => Boolean(event.data.requestHeader))?.data.requestHeader;
+    // The prompt and tool schemas are large and usually unchanged between steps.
+    // Store them only when their digest differs; otherwise a short digest proves
+    // the same content without writing ~40 KB per step.
+    const systemPromptDigest = computeRequestValueDigest(rest.systemPrompt);
+    const toolsDigest = computeRequestValueDigest(rest.tools);
     const withoutDigest: Omit<RecordedRequestHeader, 'digest'> = {
-      ...cloned,
+      ...rest,
       sourceEventSeq: this.seq,
-      ...(priorDigest ? { previousDigest: priorDigest } : {}),
+      systemPromptDigest,
+      toolsDigest,
+      ...(prior?.digest ? { previousDigest: prior.digest } : {}),
       ...(options.compaction ? { compaction: options.compaction } : {}),
     };
+    if (systemPromptDigest === prior?.systemPromptDigest) delete withoutDigest.systemPrompt;
+    if (toolsDigest === prior?.toolsDigest) delete withoutDigest.tools;
     if (options.compactHistory) {
-      delete withoutDigest.history;
       withoutDigest.historyDigest = computeRequestValueDigest(history);
       withoutDigest.historyMessages = history.length;
       // Cached per-message char walk instead of a full JSON.stringify alloc.
       withoutDigest.historyCharacters = getHistoryTotalChars(history);
+    } else {
+      withoutDigest.history = history;
     }
     const recorded = this.append('request/header', {
       requestHeader: {
@@ -457,9 +484,9 @@ export class Session {
         const header = event.data.requestHeader;
         if (!header) continue;
         if (event.seq === this.lastRecordedHeaderSeq) continue;
-        const historyAtBoundary = Session.projectHistoryFromEvents(
-          this.eventLog.slice(0, header.sourceEventSeq),
-        );
+        const boundary = this.eventLog.slice(0, header.sourceEventSeq);
+        if (replayBaseStripped(boundary)) continue;
+        const historyAtBoundary = Session.projectHistoryFromEvents(boundary);
         const { digest, ...withoutDigest } = header;
         const replayMatches = header.historyDigest
           ? computeRequestValueDigest(historyAtBoundary) === header.historyDigest
@@ -502,9 +529,9 @@ export class Session {
     for (const event of replayEvents) {
       const header = event.data.requestHeader;
       if (event.type !== 'request/header' || !header) continue;
-      const historyAtBoundary = Session.projectHistoryFromEvents(
-        this.eventLog.slice(0, header.sourceEventSeq),
-      );
+      const boundary = this.eventLog.slice(0, header.sourceEventSeq);
+      if (replayBaseStripped(boundary)) continue;
+      const historyAtBoundary = Session.projectHistoryFromEvents(boundary);
       const { digest, ...withoutDigest } = header;
       const replayMatches = header.historyDigest
         ? computeRequestValueDigest(historyAtBoundary) === header.historyDigest
@@ -688,23 +715,14 @@ export class Session {
   }
 
   addToolResultWithId(toolName: string, result: Record<string, any>, toolCallId?: string, reason?: string): void {
+    // The functionResponse is rebuilt by the projection from these fields;
+    // storing both `result` and `content` doubled every tool payload.
     this.append('tool/result', {
       toolName,
       toolCallId,
       result,
       reason,
-      content: {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: toolName,
-              id: toolCallId,
-              response: result,
-            },
-          },
-        ],
-      },
+      projectable: true,
     });
   }
 
@@ -1021,6 +1039,14 @@ export class Session {
         }
       }
     }
+    // Only the newest compaction snapshot is ever replayed; older payloads are
+    // dead weight in RAM. The persistence loader also rewrites the JSONL so the
+    // dropped snapshots stop occupying disk.
+    for (const event of this.eventLog) {
+      if (event.type !== 'session/compaction' || !event.data.messages) continue;
+      delete event.data.messages;
+      event.data.messagesStripped = true;
+    }
     this.append('session/compaction', {
       messages: newHistory,
       reason,
@@ -1086,54 +1112,7 @@ export class Session {
 
 
   static projectHistoryFromEvents(events: SessionEvent[]): Content[] {
-    let projected: Content[] = [];
-    const toolCallsByAssistantSeq = new Map<number, SessionEvent[]>();
-
-    for (const event of events) {
-      if (event.type !== 'tool/call' || event.data.assistantSeq === undefined) continue;
-      const calls = toolCallsByAssistantSeq.get(event.data.assistantSeq) || [];
-      calls.push(event);
-      toolCallsByAssistantSeq.set(event.data.assistantSeq, calls);
-    }
-
-    for (const event of events) {
-      if (event.type === 'session/compaction') {
-        projected = cloneJson(event.data.messages || []);
-        continue;
-      }
-
-      if ((event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/result') && event.data.content) {
-        const content = cloneJson(event.data.content);
-
-        if (event.type === 'assistant/message') {
-          const parts = content.parts || [];
-          const existingCallIds = new Set(parts
-            .map((part: any) => part.functionCall?.id)
-            .filter(Boolean));
-
-          for (const callEvent of toolCallsByAssistantSeq.get(event.seq) || []) {
-            const callId = callEvent.data.toolCallId;
-            if (callId && existingCallIds.has(callId)) continue;
-            parts.push({
-              ...(callEvent.data.thoughtSignature
-                ? { thoughtSignature: callEvent.data.thoughtSignature }
-                : {}),
-              functionCall: {
-                name: callEvent.data.toolName || 'unknown_tool',
-                args: callEvent.data.args || {},
-                id: callId,
-              },
-            });
-            if (callId) existingCallIds.add(callId);
-          }
-          content.parts = parts;
-        }
-
-        projected.push(content);
-      }
-    }
-
-    return projected;
+    return Session.projectHistoryWithTurns(events).map((entry) => entry.message);
   }
 
   /**
@@ -1225,8 +1204,21 @@ export class Session {
         continue;
       }
 
-      if ((event.type === 'user/message' || event.type === 'assistant/message' || event.type === 'tool/result') && event.data.content) {
-        const content = cloneJson(event.data.content);
+      const legacyContent = event.data.content;
+      const hasToolResult = event.type === 'tool/result' && event.data.projectable === true;
+      if (((event.type === 'user/message' || event.type === 'assistant/message') && legacyContent) || hasToolResult) {
+        const content: Content = legacyContent
+          ? cloneJson(legacyContent)
+          : cloneJson<Content>({
+              role: 'user',
+              parts: [{
+                functionResponse: {
+                  name: event.data.toolName,
+                  id: event.data.toolCallId,
+                  response: event.data.result,
+                },
+              }],
+            });
 
         if (event.type === 'assistant/message') {
           const parts = content.parts || [];
@@ -1268,43 +1260,54 @@ export class Session {
     return projected;
   }
 
+  /** Derived views are append-only-keyed caches; `append` invalidates by length. */
+  private getCachedProjection(): ProjectedMessageWithTurn[] {
+    if (this.projectionCache?.length !== this.eventLog.length) {
+      // shortcut: shallow freeze only guards the array; entry/message objects remain mutable — upgrade to deep freeze if a caller mutates nested state.
+      this.projectionCache = {
+        length: this.eventLog.length,
+        entries: Object.freeze(Session.projectHistoryWithTurns(this.eventLog)) as ProjectedMessageWithTurn[],
+      };
+    }
+    return this.projectionCache.entries;
+  }
+
+  private getTurnState(): { completed: number[]; open?: number } {
+    if (this.turnStateCache?.length !== this.eventLog.length) {
+      const completed: number[] = [];
+      let open: number | undefined;
+      for (const event of this.eventLog) {
+        if (event.type === 'turn/start' && event.data.turn !== undefined) {
+          open = event.data.turn;
+        } else if (event.type === 'turn/end' && event.data.turn !== undefined) {
+          if (open !== undefined && event.data.turn === open) open = undefined;
+          if (!completed.includes(event.data.turn)) completed.push(event.data.turn);
+        }
+      }
+      completed.sort((a, b) => a - b);
+      this.turnStateCache = { length: this.eventLog.length, completed, open };
+    }
+    return this.turnStateCache;
+  }
+
   /** Closed turn numbers in ascending order (every `turn/end`, any reason). */
   getCompletedTurnNumbers(): number[] {
-    const completed: number[] = [];
-    let openTurn: number | undefined;
-    for (const event of this.eventLog) {
-      if (event.type === 'turn/start' && event.data.turn !== undefined) {
-        openTurn = event.data.turn;
-      } else if (event.type === 'turn/end' && event.data.turn !== undefined) {
-        if (openTurn !== undefined && event.data.turn === openTurn) {
-          openTurn = undefined;
-        }
-        if (!completed.includes(event.data.turn)) completed.push(event.data.turn);
-      }
-    }
-    return completed.sort((a, b) => a - b);
+    return [...this.getTurnState().completed];
   }
 
   /** The currently open turn, if any. */
   getOpenTurn(): number | undefined {
-    let openTurn: number | undefined;
-    for (const event of this.eventLog) {
-      if (event.type === 'turn/start' && event.data.turn !== undefined) {
-        openTurn = event.data.turn;
-      } else if (event.type === 'turn/end' && event.data.turn === openTurn) {
-        openTurn = undefined;
-      }
-    }
-    return openTurn;
+    return this.getTurnState().open;
   }
 
   /** Turn-annotated view of the current model-facing projection. */
   getProjectionWithTurns(): ProjectedMessageWithTurn[] {
-    return Session.projectHistoryWithTurns(this.eventLog);
+    return this.getCachedProjection();
   }
 
   getHistory(): Content[] {
-    return Session.projectHistoryFromEvents(this.eventLog);
+    // Clones keep the cached projection immune to caller mutation.
+    return this.getCachedProjection().map((entry) => cloneJson(entry.message));
   }
 
   get messages(): Content[] {

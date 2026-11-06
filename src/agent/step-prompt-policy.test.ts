@@ -223,6 +223,22 @@ test('simple and final steps omit known context diluters', () => {
   }
 });
 
+test('successful read of error text is not treated as a tool failure', () => {
+  const read = policy.decide(context({
+    activeStepQuery: 'Explain how the error is thrown',
+    lastToolName: 'read_file',
+    lastToolResult: { success: true, content: 'throw new Error("boom")' },
+  }), 'enforce');
+  assert.equal(read.advicePrompt, '');
+
+  const failed = policy.decide(context({
+    activeStepQuery: 'Explain how the error is thrown',
+    lastToolName: 'read_file',
+    lastToolResult: { success: false, error: 'file not found', errorCode: 'FILE_NOT_FOUND' },
+  }), 'enforce');
+  assert.ok(failed.advicePrompt, 'a real failure still injects advice');
+});
+
 test('off mode is a legacy prompt snapshot and shadow reports potential savings', () => {
 
   const input = context({ activeStepQuery: 'Read package name and answer' });

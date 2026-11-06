@@ -146,8 +146,16 @@ export class SessionPersistence {
   }
 
   async load(sessionId: string): Promise<Session | undefined> {
-    const parsed = await this.readFile(this.getSessionPath(sessionId));
+    const filePath = this.getSessionPath(sessionId);
+    const parsed = await this.readFile(filePath);
     if (!parsed) return undefined;
+
+    // Superseded compaction payloads are dropped from RAM by readFile. Shrink
+    // the append-only file too, so a multi-MB session does not carry every old
+    // snapshot forever. Best effort: a failed rewrite keeps the original file.
+    const fileSize = parsed.strippedNewerSnapshots
+      ? await this.rewriteStripped(filePath, parsed.header, parsed.events) ?? parsed.fileSize
+      : parsed.fileSize;
 
     const snapshot: SessionSnapshot = {
       version: 1,
@@ -158,13 +166,31 @@ export class SessionPersistence {
     const session = Session.fromSnapshot(snapshot);
     this.persistedState.set(session.id, {
       persistedSeq: session.seq,
-      fileSize: parsed.fileSize,
+      fileSize,
     });
     if (session.recoverInterrupted()) {
       (session as any).wasInterruptedAndRecovered = true;
       await this.save(session);
     }
     return session;
+  }
+
+  /** Write the already-validated event log back as valid JSONL, atomically. */
+  private async rewriteStripped(
+    filePath: string,
+    header: SessionFileHeader,
+    events: SessionEvent[],
+  ): Promise<number | undefined> {
+    const temporaryPath = `${filePath}.${process.pid}-${Date.now()}.tmp`;
+    try {
+      const payload = `${[JSON.stringify(header), ...events.map((event) => JSON.stringify(event))].join('\n')}\n`;
+      await fs.writeFile(temporaryPath, payload, 'utf8');
+      await fs.rename(temporaryPath, filePath);
+      return Buffer.byteLength(payload, 'utf8');
+    } catch {
+      await fs.unlink(temporaryPath).catch(() => {});
+      return undefined;
+    }
   }
 
   /**
@@ -521,7 +547,7 @@ export class SessionPersistence {
     return { header, wanted, latestEvent, fileSize: Buffer.byteLength(raw, 'utf8') };
   }
 
-  private async readFile(filePath: string): Promise<{ header: SessionFileHeader; events: SessionEvent[]; fileSize: number } | undefined> {
+  private async readFile(filePath: string): Promise<{ header: SessionFileHeader; events: SessionEvent[]; fileSize: number; strippedNewerSnapshots: boolean } | undefined> {
     try {
       const raw = await fs.readFile(filePath, 'utf8');
       const lines = raw.split(/\r?\n/).filter(Boolean);
@@ -560,8 +586,22 @@ export class SessionPersistence {
           throw new Error(`Non-contiguous session event sequence in ${filePath}.`);
         }
       }
+      // Only the newest compaction payload is needed to rebuild history; older
+      // ones stay on disk (append-only) but no longer load into RAM.
+      let newestCompaction = -1;
+      for (let index = events.length - 1; index >= 0; index--) {
+        if (events[index].type === 'session/compaction') { newestCompaction = index; break; }
+      }
+      let strippedNewerSnapshots = false;
+      for (let index = 0; index < newestCompaction; index++) {
+        const event = events[index];
+        if (event.type !== 'session/compaction' || !event.data.messages) continue;
+        delete event.data.messages;
+        event.data.messagesStripped = true;
+        strippedNewerSnapshots = true;
+      }
 
-      return { header, events, fileSize: Buffer.byteLength(raw, 'utf8') };
+      return { header, events, fileSize: Buffer.byteLength(raw, 'utf8'), strippedNewerSnapshots };
     } catch (error: any) {
       if (error?.code === 'ENOENT') return undefined;
       throw error;

@@ -75,6 +75,23 @@ export function resolveAutoBackgroundWait(
  * lệnh riêng lẻ — upgrade: nhận thêm giá trị shell "pwsh" và bỏ kiểm tra
  * platform, hoặc tách chuỗi lệnh thành mảng trước khi bọc.
  */
+const HEAD_TAIL_PIPE = /\|\s*(head|tail)(?:\s+-n\s*(\d+)|\s+-(\d+))?\s*$/i;
+
+/**
+ * Windows cmd.exe and Windows PowerShell have no `head`/`tail`, so a trailing
+ * `| head -n N` fails with "'head' is not recognized...". Translate it to the
+ * PowerShell equivalent so the pipe keeps working. Linux targets are untouched.
+ */
+export function rewriteHeadTailPipe(command: string, mode: 'cmd' | 'powershell'): string {
+  return command.replace(HEAD_TAIL_PIPE, (_match, kind: string, n1?: string, n2?: string) => {
+    const select = kind.toLowerCase() === 'head' ? '-First' : '-Last';
+    const count = n1 || n2 || '10';
+    return mode === 'powershell'
+      ? `| Select-Object ${select} ${count}`
+      : `| powershell -NoProfile -NonInteractive -Command "$input | Select-Object ${select} ${count}"`;
+  });
+}
+
 export function wrapPowerShellCommand(command: string): string {
   const shell = process.platform === 'win32' ? 'powershell' : 'pwsh';
   const script = [
@@ -1797,7 +1814,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       // shell: "powershell" — bọc đúng một lần tại đây. Mọi payload kết quả vẫn
       // nhận effectiveCommand (lệnh gốc) để classification/allowlist/hiển thị
       // không đổi; chỉ đầu vào spawn là lệnh đã bọc.
-      const dispatchCommand = shellMode ? wrapPowerShellCommand(effectiveCommand) : effectiveCommand;
+      const dispatchCommand = shellMode
+        ? wrapPowerShellCommand(rewriteHeadTailPipe(effectiveCommand, 'powershell'))
+        : process.platform === 'win32' && !isolatedTarget
+          ? rewriteHeadTailPipe(effectiveCommand, 'cmd')
+          : effectiveCommand;
 
       // Xử lý WaitMsBeforeAsync (Antigravity CLI Async Dispatch): long-lived
       // commands (dev server/watchers) dispatch vào background ngay; lệnh finite

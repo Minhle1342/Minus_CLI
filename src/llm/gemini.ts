@@ -445,7 +445,9 @@ export class GeminiLLM {
     let history = rawHistory;
 
     if (dynamicContext && dynamicContext.trim()) {
-      const cloned = rawHistory.map((item) => cloneJson(item));
+      // getHistory() already returns fresh clones, so mutate them in place to
+      // attach the volatile dynamic suffix without a second full copy.
+      const cloned = rawHistory;
 
       if (stepSuffixes && (stepSuffixes instanceof Map ? stepSuffixes.size > 0 : Object.keys(stepSuffixes).length > 0)) {
         // Volatile Dynamic Suffix (Append-Only Prefix Extension):
@@ -559,7 +561,7 @@ export class GeminiLLM {
         || (typeof part.text === 'string' && part.text.length > 0)
       ));
       if (hasMeaningfulPart) {
-        sanitized.push({ ...cloneJson(content), parts: cloneJson(parts) });
+        sanitized.push({ ...content, parts });
       }
     }
 

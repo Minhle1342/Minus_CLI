@@ -125,6 +125,24 @@ test('searchTextTool - Offset Pagination & hasMore', async () => {
   assert.notEqual(page1.matches[0].line, page2.matches[0].line, 'Page 1 and Page 2 should not have identical starting lines');
 });
 
+test('searchTextTool - Rejects "." with a list_files pointer instead of searching', async () => {
+  const workspace = new Workspace(process.cwd());
+  const res = await searchTextTool.execute({ query: '.', path: '.' }, workspace);
+
+  assert.equal(res.errorCode, 'INVALID_ARGS');
+  assert.ok(res.suggestion.includes('list_files'), 'Should point at list_files');
+  assert.equal(res.matches, undefined, 'Must not run a search for a directory selector');
+});
+
+test('searchTextTool - Invalid regex/glob reports the engine error, not "No results"', async () => {
+  const workspace = new Workspace(process.cwd());
+  const res = await searchTextTool.execute({ query: '*.ts', path: '.' }, workspace);
+
+  assert.equal(res.errorCode, 'INVALID_REGEX');
+  assert.ok(res.error.length > 0, 'Should surface the engine error');
+  assert.notEqual(res.content, 'No results matched the request.');
+});
+
 test('searchTextTool - Diversity Budgeting distributes matches across files', async () => {
   const workspace = new Workspace(process.cwd());
   const res = await searchTextTool.execute(

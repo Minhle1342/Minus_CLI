@@ -27,8 +27,6 @@ import { SharedContextService } from '../agent/shared-context-service.js';
 import { AgentEventBus } from '../agent/agent-event-bus.js';
 import { AgentOrchestrator } from '../agent/agent-orchestrator.js';
 import { DreamManager } from '../dream/dream-manager.js';
-import { McpManager } from '../mcp/mcp-manager.js';
-import { ReaMcpManager } from '../mcp/rea-mcp-manager.js';
 import { ComposeController } from '../agent/compose-controller.js';
 import { GrillService } from '../agent/grill-service.js';
 import { ComposePlugin } from './plugins/compose-plugin.js';
@@ -189,8 +187,6 @@ export interface KernelContext {
   sandbox: SandboxManager;
   tasks: TaskManager;
   schedules: ScheduleManager;
-  browserMcp: McpManager;
-  reaMcp: ReaMcpManager;
   sharedContext: SharedContextService;
   agentEvents: AgentEventBus;
   orchestrator: AgentOrchestrator;
@@ -264,9 +260,6 @@ export class AgentKernel {
     tools.attachSessionDiff(() => this.ctx?.checkpoints);
     tools.attachAgentOrchestrator(orchestrator);
     tools.attachGitTools(workspace);
-    const browserMcp = new McpManager();
-    tools.attachBrowserManager(browserMcp);
-    const reaMcp = new ReaMcpManager();
     const permissions = new PermissionManager();
     tools.attachPermissionManager(permissions);
     const toolRunner = new ToolRunner(tools, workspace, permissions, compose);
@@ -297,8 +290,6 @@ export class AgentKernel {
       sandbox,
       tasks,
       schedules,
-      browserMcp,
-      reaMcp,
       sharedContext,
       agentEvents,
       orchestrator,
@@ -405,37 +396,9 @@ export class AgentKernel {
 
     // Tool/capability registration must survive a Docker startup failure.
     await this.ctx.sandbox.init();
-    await this.attachReaTools();
 
     this.isInitialized = true;
     this.ctx.events.emit('kernel:init');
-  }
-
-  /**
-   * REA discovery spawns npx on first run, so cap it: a slow or offline server
-   * must not delay agent startup. Tools still register if discovery finishes late.
-   */
-  private async attachReaTools(): Promise<void> {
-    if (String(process.env.REA_MCP_DISABLE || '') === '1') return;
-    let timer: NodeJS.Timeout | undefined;
-    try {
-      await Promise.race([
-        this.ctx.tools.attachReaManager(this.ctx.reaMcp),
-        new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('REA MCP discovery timeout')), 20000);
-          timer.unref?.();
-        }),
-      ]);
-    } catch (err: any) {
-      // Optional: REA is provider-gated (Ghidra/JDK, objdump/Rizin, or static
-      // .NET/JS analysis); other tools remain available.
-      console.warn(
-        `[rea] Reverse-engineering tools unavailable: ${this.ctx.reaMcp.getLastError() || err?.message || err}. ` +
-        'Requires Node 22.19+/24.11+/26+. Set REA_MCP_COMMAND, or check with "npx -y rea-agents mcp".',
-      );
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
   }
 
   /**
@@ -471,7 +434,6 @@ export class AgentKernel {
     this.ctx.schedules.dispose();
     void disposeLspManager(this.ctx.workspace);
     await this.ctx.sandbox.dispose().catch(() => {});
-    await this.ctx.reaMcp.dispose().catch(() => {});
     await this.ctx.tasks.dispose().catch(() => {});
     this.isInitialized = false;
     this.ctx.events.emit('kernel:disposed');

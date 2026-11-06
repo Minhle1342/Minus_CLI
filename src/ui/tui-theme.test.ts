@@ -1,8 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import React from 'react';
-import { renderToString } from 'ink';
 import {
   CLI,
   getTerminalWidth,
@@ -10,13 +8,6 @@ import {
   stripAnsiForDisplay,
 } from './cli-ui.js';
 import { supportsTerminalColor } from './tui-theme.js';
-import { Header } from './ink/components/Header.js';
-import { DiffPreviewBox } from './ink/components/DiffPreviewBox.js';
-import { InputPromptBar } from './ink/components/InputPromptBar.js';
-import { TelemetryBar } from './ink/components/TelemetryBar.js';
-import { StepStream } from './ink/components/StepStream.js';
-import { PermissionPromptBox } from './ink/components/PermissionPromptBox.js';
-import { LiveReasoningBox } from './ink/components/LiveReasoningBox.js';
 
 function captureAtWidth(columns: number, render: () => void): string {
   const originalColumns = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
@@ -120,76 +111,5 @@ describe('dark terminal TUI theme', () => {
     assertFits(output, 40);
     assert.match(output, /replaced/);
     assert.match(output, /failed/);
-  });
-
-  it('renders Ink status, diff and input legibly at 40 columns', () => {
-    const header = renderToString(React.createElement(Header, {
-      modelName: 'gemini-3.1-flash-lite-preview',
-      workspacePath: 'D:\\AgentLearn\\CodingAgent',
-      sandboxMode: 'local',
-      status: 'completed',
-      activePhase: 'IDLE',
-      currentStep: 1,
-      maxSteps: 30,
-    }), { columns: 40 });
-    assertFits(header, 40);
-    assert.match(stripAnsiForDisplay(header), /Hoàn tất/);
-
-    const diff = renderToString(React.createElement(DiffPreviewBox, {
-      diff: {
-        file: 'src/very-long-name.ts',
-        lines: ['--- a/src/very-long-name.ts', '+++ b/src/very-long-name.ts', '@@ -1,1 +1,1 @@', '-old value', '+new value'],
-      },
-    }), { columns: 40 });
-    assertFits(diff, 40);
-    assert.match(stripAnsiForDisplay(diff), /\+new value/);
-
-    const input = renderToString(React.createElement(InputPromptBar, {
-      onSubmit: () => {},
-      disabled: true,
-      workspacePath: process.cwd(),
-    }), { columns: 40 });
-    assertFits(input, 40);
-    assert.match(stripAnsiForDisplay(input), /Đang chạy/);
-    assert.match(stripAnsiForDisplay(input), /❯ Đang chạy/);
-
-    const telemetry = renderToString(React.createElement(TelemetryBar, {
-      usedTokens: 45_000,
-      maxTokens: 100_000,
-      promptTokens: 5_000,
-      cachedTokens: 1_000,
-      cacheHitRate: 20,
-    }), { columns: 40 });
-    assertFits(telemetry, 40);
-    assert.match(stripAnsiForDisplay(telemetry), /Context .*%/);
-
-    const steps = renderToString(React.createElement(StepStream, {
-      steps: [{
-        id: '1', step: 1, maxSteps: 30, phase: 'IMPLEMENT',
-        toolName: 'replace_text', args: { path: 'src/very-long-name.ts' },
-        durationMs: 230, result: { replacements: 1 }, status: 'success', timestamp: Date.now(),
-      }],
-    }), { columns: 40 });
-    assertFits(steps, 40);
-    assert.match(stripAnsiForDisplay(steps), /● replace_text/);
-
-    const permission = renderToString(React.createElement(PermissionPromptBox, {
-      permission: {
-        id: 'p1', toolName: 'replace_text', target: 'src/very-long-name.ts',
-        args: { path: 'src/very-long-name.ts' }, resolve: () => {},
-      },
-      onResolve: () => {},
-    }), { columns: 40 });
-    assertFits(permission, 40);
-    assert.match(stripAnsiForDisplay(permission), /Công cụ replace_text/);
-
-    const reasoning = renderToString(React.createElement(LiveReasoningBox, {
-      reasoning: 'Đang xem xét một dòng giải thích khá dài ở trong terminal hẹp',
-      isCollapsed: false,
-      status: 'thinking',
-      isThinking: true,
-    }), { columns: 40 });
-    assertFits(reasoning, 40);
-    assert.match(stripAnsiForDisplay(reasoning), /REASONING TRACE/);
   });
 });

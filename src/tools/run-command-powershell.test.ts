@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import { createRunCommandTool, wrapPowerShellCommand } from './run-command.js';
+import { createRunCommandTool, rewriteHeadTailPipe, wrapPowerShellCommand } from './run-command.js';
 import { normalizeWindowsCommand } from './command-preflight-guard.js';
 import { unwrapPowerShellCliXml } from './terminal-sanitizer.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -32,6 +32,32 @@ test('wrapPowerShellCommand encodes prelude, command and exit-code tail', () => 
   const tricky = 'Write-Output "a $b & c"';
   assert.ok(decodeEncodedCommand(wrapPowerShellCommand(tricky)).includes(tricky));
 });
+
+test('rewriteHeadTailPipe maps head/tail onto Select-Object on Windows', () => {
+  assert.equal(
+    rewriteHeadTailPipe('git log --oneline | head -n 20', 'cmd'),
+    'git log --oneline | powershell -NoProfile -NonInteractive -Command "$input | Select-Object -First 20"',
+  );
+  assert.equal(rewriteHeadTailPipe('git log | tail -5', 'powershell'), 'git log | Select-Object -Last 5');
+  assert.equal(rewriteHeadTailPipe('git log | head', 'powershell'), 'git log | Select-Object -First 10');
+  // No trailing limiter: untouched.
+  assert.equal(rewriteHeadTailPipe('git log --grep=head', 'cmd'), 'git log --grep=head');
+});
+
+test(
+  'run_command keeps a | head pipeline working on Windows',
+  { skip: !win32 },
+  async () => {
+    const res = await createRunCommandTool().execute(
+      { command: 'node -e "console.log(\'a\');console.log(\'b\');console.log(\'c\')" | head -n 2' },
+      new Workspace(),
+      { permissionGranted: true } as any,
+    );
+    assert.equal(res.exitCode, 0, JSON.stringify(res));
+    assert.match(res.stdout, /a/);
+    assert.doesNotMatch(res.stdout, /c/);
+  },
+);
 
 test('unwrapPowerShellCliXml turns PowerShell error CLIXML into readable text', () => {
   const raw = [

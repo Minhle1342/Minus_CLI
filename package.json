@@ -51,29 +51,18 @@
   "dependencies": {
     "@alibaba-group/open-code-review": "1.12.5",
     "@google/genai": "^2.18.0",
-    "@playwright/mcp": "^0.0.25",
     "diff": "^9.0.0",
-    "dotenv": "^16.4.7",
     "fast-glob": "^3.3.3",
     "fast-xml-parser": "^5.11.1",
-    "json5": "^2.2.3",
-    "minimatch": "^10.2.6",
     "minisearch": "^7.2.0",
     "playwright": "^1.49.0",
-    "prettier": "^3.9.9",
-    "repomix": "^1.18.0",
     "string-width": "^8.2.2",
     "ts-morph": "^28.0.0",
-    "wrap-ansi": "^10.0.1",
-    "yaml": "^2.9.1"
+    "wrap-ansi": "^10.0.1"
   },
   "devDependencies": {
     "@types/diff": "^7.0.2",
-    "@types/minimatch": "^5.1.2",
     "@types/node": "^22.13.10",
-    "@types/react": "^19.2.18",
-    "ink": "^7.1.1",
-    "react": "^19.2.8",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
   },

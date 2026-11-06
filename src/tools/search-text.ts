@@ -143,6 +143,15 @@ export const searchTextTool: ToolDefinition = {
       };
     }
 
+    // "." chọn thư mục chứ không phải nội dung cần grep (model hay gửi nhầm khi muốn list files).
+    if (rawQuery === "." || rawQuery === "./" || rawQuery === ".\\") {
+      return {
+        error: `"${rawQuery}" is a directory selector, not search content. Use list_files({ path: "${rawPath}" }) to list files, or pass a symbol/text to search_text.`,
+        errorCode: "INVALID_ARGS",
+        suggestion: `list_files({ path: "${rawPath}" })`,
+      };
+    }
+
     // Kiểm tra đường dẫn tồn tại trước khi tìm
     try {
       workspace.resolveSafePath(rawPath);
@@ -179,6 +188,7 @@ export const searchTextTool: ToolDefinition = {
       "typescript-emulator";
     let rawStdout = "";
     let totalMatchCount = 0;
+    let engineError = "";
 
     // 1. Thử nghiệm chạy với Ripgrep CLI native trên hệ thống nếu khả dụng
     const rgAvailable = await checkRipgrepAvailable();
@@ -228,6 +238,21 @@ export const searchTextTool: ToolDefinition = {
       const emulated = await executeRipgrepEmulation(options, workspace);
       rawStdout = emulated.stdout.trim();
       totalMatchCount = emulated.matchCount;
+      engineError = emulated.stderr.trim();
+    }
+
+    // Query hỏng (regex/glob sai) phải trả lỗi thật, không giả làm "không có kết quả".
+    if (engineError) {
+      return {
+        query: rawQuery,
+        path: rawPath,
+        engine: engineUsed,
+        error: engineError,
+        errorCode: "INVALID_REGEX",
+        content: "",
+        suggestion:
+          'Use a valid regex (glob "*" is not regex; escape it as "\\*") or list_files with the "pattern" parameter to find files by name.',
+      };
     }
 
     // 3. Xử lý kết quả theo từng outputMode

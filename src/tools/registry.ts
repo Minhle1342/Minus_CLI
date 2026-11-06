@@ -93,7 +93,6 @@ function modelVisibleTools(tools: ToolDefinition[]): ToolDefinition[] {
 export class ToolRegistry implements ToolProvider {
   private tools = new Map<string, ToolDefinition>();
   private retriever: ToolRetriever;
-  private computerController?: any;
   private sandboxManager?: any;
   private taskManager?: any;
   private permissionManager?: any;
@@ -142,23 +141,6 @@ export class ToolRegistry implements ToolProvider {
 
   async registerGameTools(): Promise<void> {
     // No-op: game tools removed
-  }
-
-  attachComputerController(controller: any): void {
-    this.computerController = controller;
-  }
-
-  attachBrowserManager(_manager: any): void {
-    // No-op: browser MCP tools removed
-  }
-
-  async attachReaManager(_manager: any): Promise<number> {
-    // No-op: REA tools removed
-    return 0;
-  }
-
-  getComputerController(): any {
-    return this.computerController;
   }
 
   attachPlanManager(_planManager: any): void {

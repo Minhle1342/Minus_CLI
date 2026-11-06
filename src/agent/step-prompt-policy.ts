@@ -2,6 +2,7 @@ import type { ClassificationDecision, TaskPhase } from '../control/classificatio
 import type { CompletionObservation } from './completion-observations.js';
 import { resolveGitWorkflow, gitWorkflowGuidance, type GitWorkflowState } from './git-workflow.js';
 import { isMutationTool as isSharedMutationTool } from '../tools/diff-generator.js';
+import { isToolResultFailure } from './completion-evidence.js';
 import {
   SECTION_TOOL_PLAYBOOKS,
   type ToolPlaybookPromptId,
@@ -113,15 +114,6 @@ function estimateTokens(parts: Array<string | undefined>): number {
   return Math.ceil(chars / 4);
 }
 
-function stringifyResult(result: unknown): string {
-  if (result === undefined || result === null) return '';
-  try {
-    return typeof result === 'string' ? result : JSON.stringify(result);
-  } catch {
-    return String(result);
-  }
-}
-
 function isMutationTool(toolName?: string): boolean {
   if (!toolName) return false;
   // Single source of truth lives in tools/diff-generator.ts (FILE_MUTATION_TOOLS).
@@ -209,9 +201,11 @@ export class StepPromptPolicy {
     const selectedPlaybooks: ToolPlaybookPromptId[] = [];
     const lower = query.toLowerCase();
     const capabilities = new Set(context.classification.requiredCapabilities);
-    const lastResult = stringifyResult(context.lastToolResult).toLowerCase();
+    // A tool result is a failure only when its structured outcome says so;
+    // file content containing the word "error" is still a successful read.
     const lastToolFailed = Boolean(context.failureSignature)
-      || /(error|failed|failure|exception|exitcode[^0-9]*[1-9])/.test(lastResult);
+      || (typeof context.lastToolResult === 'object' && context.lastToolResult !== null
+        && isToolResultFailure(context.lastToolResult as Record<string, any>));
 
     if (!context.hasSubmittedSolution && !context.hasVerifiedTests && context.classification.phase === 'verify') {
       selectedPlaybooks.push('verifyDiff');

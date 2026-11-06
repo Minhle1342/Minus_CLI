@@ -8,10 +8,6 @@ import { PlanManager } from './plan-manager.js';
 import { DomainIntentGuardian } from './domain-intent-guardian.js';
 import { ReproductionVerificationManager, TestEngineeringHarness } from '../testing/test-engineering-harness.js';
 import { HypothesisTracker } from './hypothesis-tracker.js';
-import { AcceptancePolicy } from '../control-plane/critic/acceptance-policy.js';
-import { CompletionGate } from '../control-plane/critic/completion-gate.js';
-import { createInitialControlPlaneState } from '../control-plane/control-plane-state.js';
-import { VerificationContractFactory } from '../control-plane/verification/verification-contract.js';
 
 function context() {
   return { session: new Session(), turn: 1, userRequest: 'Read only: explain the status.', workspaceRoot: process.cwd(),
@@ -85,19 +81,6 @@ test('expected failing reproduction validates hypothesis instead of triggering r
     substrate: { exec: async () => ({ stdout: 'FAIL example.test.ts\nTests: 1 failed, 1 total\nTest Suites: 1 failed, 1 total', stderr: '', exitCode: 1, durationMs: 1 }) } as any });
   await harness.runTests({ testCommand: 'npm test', hypothesisId: hypothesis.id, expectedOutcome: 'fail' });
   assert.equal(tracker.getLatestHypothesis()?.status, 'validated');
-});
-test('latent EDCP readonly completion still requires submission and resolved testing hypothesis', () => {
-  const workspace = createInitialControlPlaneState({ workspaceRoot: process.cwd() }).workspace;
-  const contract = VerificationContractFactory.createContract({ taskId: 'readonly', taskGoal: 'Explain the status' });
-  const params = { workspace, contract, freshEvidence: [], allEvidence: [] };
-  assert.equal(CompletionGate.evaluateCompletion(params).canComplete, false);
-  assert.equal(CompletionGate.evaluateCompletion({ ...params, hasSubmittedSolution: true }).canComplete, true);
-  assert.equal(CompletionGate.evaluateCompletion({ ...params, hasSubmittedSolution: true, activeHypothesis: { id: 'H1', status: 'TESTING' } as any }).canComplete, false);
-});
-test('latent EDCP acceptance diagnostics are scoped to changed files', () => {
-  const diagnostics = { errors: [{ file: 'unrelated.ts', line: 1, message: 'old error', category: 'error' as const }], syntaxErrors: [], unresolvedImports: [], warnings: [], timestamp: Date.now() };
-  assert.equal(AcceptancePolicy.checkHardInvariants({ diagnostics, changedFiles: [] }).passed, true);
-  assert.equal(AcceptancePolicy.checkHardInvariants({ diagnostics, changedFiles: [{ path: 'unrelated.ts' } as any] }).passed, false);
 });
 test('Provenance-aware: Agent-created test files are allowed to be modified while human base files are guarded', () => {
   const guardian = new DomainIntentGuardian();

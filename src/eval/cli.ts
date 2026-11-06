@@ -1,10 +1,11 @@
-import dotenv from 'dotenv';
 import { BenchmarkRunner } from './benchmark-runner.js';
 import { ReplayEvaluator } from './replay-evaluator.js';
 import { BENCHMARK_TASKS } from './benchmark-tasks.js';
 import { colors as c } from '../ui/cli-ui.js';
 
-dotenv.config();
+try {
+  process.loadEnvFile?.();
+} catch {}
 
 function parseArgs() {
   const args = process.argv.slice(2);

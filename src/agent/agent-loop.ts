@@ -2731,6 +2731,7 @@ export class AgentLoop {
         };
         const { history: _requestHistory, ...requestMetadata } = requestEnvelope;
         this.lastRequestEnvelope = { sessionId: session.id, envelope: requestMetadata };
+        const stepProjection = session.getProjectionWithTurns();
         const contextPreparation = await this.contextBudgetManager.prepareRequest(requestEnvelope, {
           mutatedFiles: Array.from(this.targetFilesModifiedInTurn),
           cognitivePhase: classification.phase === 'release' ? 'verify' : classification.phase,
@@ -2738,13 +2739,13 @@ export class AgentLoop {
           protectActiveTurn: true,
           plan: this.planManager.getTaskGraph(),
           recoveryWindow: {
-            entries: session.getProjectionWithTurns(),
+            entries: stepProjection,
             completedTurns: session.getCompletedTurnNumbers(),
             openTurn: session.getOpenTurn(),
           },
           replacedObservationIds: selectReplacedObservationIds(preCompactionHistory),
           protectedMessages: (() => {
-            const currentTurnEntries = session.getProjectionWithTurns().filter((entry) => entry.turn === turn);
+            const currentTurnEntries = stepProjection.filter((entry) => entry.turn === turn);
             if (currentTurnEntries.length <= 4) {
               return currentTurnEntries.map((entry) => entry.message);
             }
@@ -3158,19 +3159,7 @@ export class AgentLoop {
 
         let userGoal: string | undefined = this.goalManager?.getState()?.objective;
         if (!userGoal) {
-          const history = session.getHistory();
-          for (let i = history.length - 1; i >= 0; i--) {
-            const item = history[i];
-            if (item?.role === 'user' && item.parts) {
-              for (const p of item.parts) {
-                if (p?.text) {
-                  userGoal = p.text;
-                  break;
-                }
-              }
-              if (userGoal) break;
-            }
-          }
+          userGoal = turnUserRequest || undefined;
         }
 
         const stepSummary = generateFallbackStepSummary({

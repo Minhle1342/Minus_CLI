@@ -12,6 +12,7 @@ import type { ArchivedTurnDocument } from '../context/turn-memory-retriever.js';
 import { collectCompactionEvidence, renderCompactionTaskState } from './compaction-evidence.js';
 import type { PlanTaskGraph } from './plan-manager.js';
 import { compactHistoryWithLLM } from './llm-compactor.js';
+import { getToolOutputSummary, generateFastHeuristicSummary } from '../tools/background-summarizer.js';
 
 export interface CompactionConfig {
   maxCharactersPerToolResult?: number;
@@ -1568,22 +1569,24 @@ export class ContextCompactor {
                 observationMask: `[OBSERVATION MASKED: File "${r.path}" (${outline.totalLines || 0} lines). Symbols: ${topSymbols.join(', ') || 'none'}. Full content archived (see archiveId); auto re-injected on reference, else re-read with read_file]`,
               };
             }
-            // 2b: Command log cũ -> Giữ status gọn
+            // 2b: Command log cũ -> Giữ status gọn bằng Background Summarizer
             else if (r.stdout !== undefined || r.stderr !== undefined) {
               const rawLog = String(r.stderr || r.stdout || '').trim();
+              const summary = (resp.id ? getToolOutputSummary(resp.id, rawLog) : undefined)
+                || generateFastHeuristicSummary({ toolName: resp.name, rawText: rawLog, exitCode: r.exitCode, command: r.command });
               if (r.exitCode === 0) {
                 compressedPayload = {
                   exitCode: 0,
                   command: r.command,
                   status: 'masked',
-                  observationMask: `[OBSERVATION MASKED: Command executed successfully (exit 0). Long log (${rawLog.length} chars) archived (see archiveId); auto re-injected on reference]`,
+                  observationMask: `[OBSERVATION MASKED: Command executed successfully (exit 0). ${summary}. Full log archived (see archiveId)]`,
                 };
               } else {
                 const logLines = rawLog.split('\n');
                 compressedPayload = {
                   exitCode: r.exitCode,
                   status: 'masked',
-                  observationMask: `[OBSERVATION MASKED: Command failed (exit ${r.exitCode}); full log archived (see archiveId)]`,
+                  observationMask: `[OBSERVATION MASKED: ${summary}. Full log archived (see archiveId)]`,
                   errorTail: logLines.slice(-3).join('\n'),
                 };
               }
@@ -1595,11 +1598,24 @@ export class ContextCompactor {
                 observationMask: `[OBSERVATION MASKED: Search results (${r.totalMatches || r.matches.length} matches) archived (see archiveId); auto re-injected on reference]`,
               };
             }
-            // 2d: Khác
-            else {
+            // 2d: Output / Spilled Tool Result cũ
+            else if (r.output !== undefined && typeof r.output === 'string') {
+              const summary = (resp.id ? getToolOutputSummary(resp.id, r.output) : undefined)
+                || generateFastHeuristicSummary({ toolName: resp.name, rawText: r.output });
               compressedPayload = {
                 status: 'masked',
-                observationMask: `[OBSERVATION MASKED: Stale data (${respStr.length} chars) archived (see archiveId); auto re-injected on reference]`,
+                observationMask: `[OBSERVATION MASKED: ${summary}. Full log archived (see archiveId)]`,
+              };
+            }
+            // 2e: Khác
+            else {
+              const isTruncated = respStr.includes('TRUNCATED:');
+              const summary = isTruncated
+                ? ((resp.id ? getToolOutputSummary(resp.id, respStr) : undefined) || generateFastHeuristicSummary({ toolName: resp.name, rawText: respStr }))
+                : `Stale data (${respStr.length} chars)`;
+              compressedPayload = {
+                status: 'masked',
+                observationMask: `[OBSERVATION MASKED: ${summary} archived (see archiveId); auto re-injected on reference]`,
               };
             }
 

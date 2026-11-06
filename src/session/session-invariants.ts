@@ -6,8 +6,12 @@ import { nativeComputeStringHash } from '../native/index.js';
 export interface RecordedRequestHeader {
   turn: number;
   step: number;
-  systemPrompt: string;
-  tools: unknown[];
+  /** Omitted when unchanged from the previous header; see systemPromptDigest. */
+  systemPrompt?: string;
+  /** Omitted when unchanged from the previous header; see toolsDigest. */
+  tools?: unknown[];
+  systemPromptDigest?: string;
+  toolsDigest?: string;
   /** Legacy exact snapshot. New events use historyDigest to avoid quadratic JSONL growth. */
   history?: Content[];
   historyDigest?: string;

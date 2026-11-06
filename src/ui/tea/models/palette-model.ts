@@ -30,7 +30,7 @@ export function paletteView(model: PaletteModel, width: number, height: number):
   const start = Math.max(0, model.selected - Math.max(0, height - 5));
   const rows = items.slice(start, start + Math.max(0, height - 4)).map((item, i) => {
     // P1: matched-id highlight + description so rows scan faster than id-only text.
-    const id = highlightMatch(item.id, model.query);
+    const id = color(tokyoNight.blue, highlightMatch(item.id, model.query));
     const desc = item.description ? color(tokyoNight.muted, ` · ${item.description}`) : '';
     return `${start + i === model.selected ? '›' : ' '} ${id}  ${item.label}${desc}`;
   });

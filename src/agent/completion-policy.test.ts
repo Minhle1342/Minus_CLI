@@ -4,7 +4,6 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { FinalAnswerGuard, verifyWorkspaceGrounding, hasUnfulfilledDeferredPromise, isSystemPromptEcho, stripSystemPromptEcho } from './final-answer-guard.js';
-import { AcceptancePolicy } from '../control-plane/critic/acceptance-policy.js';
 import { CompletionEvidenceGate, isUserExplicitlyExemptingTests, isVerificationCommand } from './completion-evidence.js';
 import { collectCompletionObservations, getTurnCompletionState, hasObservedMutation } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
@@ -51,7 +50,6 @@ test('both guards agree on quotations, examples, proposals, and real deferred wo
   ];
   for (const [answer, expected] of examples) {
     assert.equal(guard.evaluate(answer).allow, expected, answer);
-    assert.equal(AcceptancePolicy.checkHardInvariants({ diagnostics, changedFiles: [], finalAnswerText: answer }).passed, expected, answer);
   }
   assert.equal(hasUnfulfilledDeferredPromise('Findings are ready. If you want, I will benchmark it.'), false);
 });

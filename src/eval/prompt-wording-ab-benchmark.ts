@@ -7,7 +7,6 @@
  *
  * Run: node --import tsx src/eval/prompt-wording-ab-benchmark.ts [--rounds=5] [--model=gemini-3.5-flash-lite]
  */
-import dotenv from 'dotenv';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -17,7 +16,9 @@ import { SECTION_ANTIGRAVITY_TOOLCHAIN_FULL, SECTION_TERMINAL_SANDBOX_FULL } fro
 import { SECTION_PHASE_IMPLEMENT_GUIDANCE } from '../llm/sections/phases.js';
 import { SECTION_FINAL_ANSWER_RECEIPT } from '../llm/sections/completion.js';
 
-dotenv.config();
+try {
+  process.loadEnvFile?.();
+} catch {}
 
 const arg = (name: string, fallback: string) =>
   process.argv.find((a) => a.startsWith(`--${name}=`))?.slice(name.length + 3) || fallback;

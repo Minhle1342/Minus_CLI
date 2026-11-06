@@ -22,6 +22,7 @@ import {
   type PreToolUseHookFn,
   evaluatePreToolUse,
 } from './pre-tool-use.js';
+import { generateFastHeuristicSummary, summarizeToolOutputInBackground } from './background-summarizer.js';
 
 /**
  * Satellite 1: Observation Virtualization / Spill-to-Disk Constants
@@ -105,8 +106,23 @@ export function virtualizeToolOutput(
 
     fs.writeFileSync(fullLogPath, rawText, 'utf8');
 
+    const summary = generateFastHeuristicSummary({
+      toolName,
+      rawText,
+      targetPath: fieldName,
+      fieldName,
+    });
+    void summarizeToolOutputInBackground({
+      toolCallId: safeId,
+      toolName,
+      rawText,
+      logPath: fullLogPath,
+      fieldName,
+    }).catch(() => {});
+
     const preview: string[] = [
       `[${label} TRUNCATED: ${rawText.length.toLocaleString()} characters spilled to ${relLogPath}]`,
+      `[Summary: ${summary}]`,
       `--- Output Preview (First ${headLines.length} lines) ---`,
       headLines.join('\n'),
     ];
@@ -120,8 +136,15 @@ export function virtualizeToolOutput(
     preview.push(`--- Tip: To inspect full output, run \`grep\` or \`read_file\` on the log file above ---`);
     return preview.join('\n');
   } catch (_err) {
+    const summary = generateFastHeuristicSummary({
+      toolName,
+      rawText,
+      targetPath: fieldName,
+      fieldName,
+    });
     const preview: string[] = [
       `[${label} TRUNCATED: ${rawText.length.toLocaleString()} characters (spill fallback)]`,
+      `[Summary: ${summary}]`,
       `--- Output Preview (First ${headLines.length} lines) ---`,
       headLines.join('\n'),
     ];
