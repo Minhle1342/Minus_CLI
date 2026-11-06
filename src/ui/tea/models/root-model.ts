@@ -13,7 +13,7 @@ import { createGrillModel, grillKey, grillView } from './grill-model.js';
 import { createModelPickerModel, modelPickerKey, modelPickerLayout } from './model-picker-model.js';
 import { createPermissionModel, permissionKey, permissionView } from './permission-model.js';
 import { createSubagentsModal, subagentsModalKey, subagentsModalView } from './subagent-modal.js';
-import { fit, wrap, joinHorizontal, joinVertical, paintCanvas, color, tokyoNight } from '../styles/theme.js';
+import { fit, wrap, joinHorizontal, joinVertical, paintCanvas, color, tokyoNight, stripTerminalControls } from '../styles/theme.js';
 
 const defaultCommands: PaletteItem[] = [
   { id: '/help', label: 'Help', description: 'Show commands' },
@@ -408,11 +408,17 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
             return typeof diff === 'string' ? { ...next, diff: { ...createDiffViewer(), ...(t.diff ?? {}), text: diff, offset: 0 } } : next;
           }) } };
           // Explore tools thành công: gộp call entry + result thành MỘT dòng (thay thế chỗ call).
-          // Không tìm thấy call entry (tool:after mồ côi / hydrate lệch) → fallback push result entry.
+          // Mutation tool (vd run_command đã có stream lines trong entry call): thay thế entry call
+          // đang sống bằng entry kết quả cuối. Không tìm thấy → fallback push result entry.
           const merged = mergedToolEntry(name, args, result);
           if (merged) {
             const callText = toolCallEntry(name, args);
             const replaced = ownerReplaceLastEntry(withTabs, e => e.kind === 'tool' && e.text === callText, { kind: 'tool' as const, text: merged }, explicitOwner);
+            if (replaced !== withTabs) return [replaced, []];
+          } else if (name === 'run_command') {
+            // run_command may carry streamed lines in its live call entry: replace
+            // that call entry with the final result entry instead of appending.
+            const replaced = ownerReplaceLastEntry(withTabs, e => e.kind === 'tool' && !/^[✔✖⊘]/.test(stripTerminalControls(e.text)) && e.text.includes(String(name)), { kind: 'tool' as const, text: toolResultEntry(name, result, duration, args) }, explicitOwner);
             if (replaced !== withTabs) return [replaced, []];
           }
           return [ownerAppendEntry(withTabs, { kind: 'tool', text: toolResultEntry(name, result, duration, args) }, explicitOwner), []];
@@ -421,6 +427,28 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
           const entry = { kind: 'tool' as const, text: toolErrorEntry(String(msg.args[0] ?? 'unknown_tool'), msg.args[1]) };
           if (!entry.text.trim()) return [model, []];
           return [ownerAppendEntry(model, entry, explicitOwner), []];
+        }
+        case 'tool:stream': {
+          // Cập nhật dòng log live vào entry tool call đang mở của cùng toolName,
+          // thay vì push entry mới mỗi dòng — giữ viewport gọn và cho phép tool:after
+          // sau này thay thế toàn bộ bằng kết quả cuối.
+          const [toolName, line] = msg.args;
+          const target = String(toolName);
+          const flushed = ownerFlushLiveAnswer(model, explicitOwner);
+          if (ownerActive) {
+            const entries = [...flushed.viewport.entries];
+            for (let i = entries.length - 1; i >= 0; i--) {
+              const e = entries[i];
+              if (e.kind !== 'tool') continue;
+              const stripped = stripTerminalControls(e.text);
+              if (/^[✔✖⊘]/.test(stripped)) continue; // already a result entry
+              if (!e.text.includes(target)) continue;
+              entries[i] = { ...e, text: e.text + '\n' + String(line) };
+              return [{ ...flushed, viewport: { ...flushed.viewport, entries } }, []];
+            }
+          }
+          // No matching live call entry (inactive tab or tool:before missing) → append as new entry.
+          return [ownerAppendEntry(flushed, { kind: 'tool' as const, text: String(line) }, explicitOwner), []];
         }
         case 'model:usage': {
           const tokens = msg.args[0].promptTokens || msg.args[0].totalTokens || 0;

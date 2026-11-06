@@ -1,7 +1,7 @@
 import type { ViewportModel, TranscriptEntry, SessionTab, SessionTabsModel, RootModel, Cmd, KeyMsg, ComposerModel, DiffViewerModel } from '../types.js';
 import { color, displayWidth, fit, lipGlossTheme, paintInput, stripTerminalControls, tokyoNight, wrap } from '../styles/theme.js';
 import { formatMarkdownTablesWithTea } from '../styles/table.js';
-import { toolCallEntry, toolResultEntry, mergedToolEntry, diffFrame, diffLineTone } from './tool-entry.js';
+import { toolCallEntry, toolResultEntry, mergedToolEntry, streamLinesBody, diffFrame, diffLineTone } from './tool-entry.js';
 import { createComposer } from './composer-model.js';
 import { createDiffViewer } from './diff-model.js';
 import type { PermissionCard } from '../types.js';
@@ -559,7 +559,7 @@ function entryLines(entry: TranscriptEntry, width: number, collapsed: boolean, p
           const prefixColor = entry.kind === 'user' ? tokyoNight.blue : isAnswerLike ? tokyoNight.purple : tokyoNight.muted;
           const textColor = entry.kind === 'tool' ? tokyoNight.cyan : entry.kind === 'step' ? tokyoNight.yellow : tokyoNight.text;
           const body = isAnswerLike ? formatAnswer(entry.text, width)
-            : entry.kind === 'tool' ? formatTool(entry.text)
+            : entry.kind === 'tool' ? formatTool(streamLinesBody(entry.text))
             : color(textColor, stripTerminalControls(entry.text));
           if (entry.kind === 'permission' && entry.permission) {
             rendered = permissionLines(entry.permission, width);

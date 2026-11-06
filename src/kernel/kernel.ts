@@ -59,6 +59,8 @@ export interface KernelEvents {
     context?: { sessionId?: string; agentId?: string; turn?: number; isSubagent?: boolean },
   ) => void;
   'tool:error': (toolName: string, error: any, ctx?: SessionEventContext) => void;
+  /** Streamed tool output line (run_command build/test log, film-strip style). */
+  'tool:stream': (toolName: string, line: string, lineIndex: number, isLast: boolean, ctx?: SessionEventContext) => void;
   'model:thought': (thought: string, ctx?: SessionEventContext) => void;
   'model:thinking:start': (lifecycle: {
     agentId: string;
@@ -251,6 +253,7 @@ export class AgentKernel {
     orchestrator.bindPlanManager(plan);
     orchestrator.bindEventBus(agentEvents);
     const tools = new ToolRegistry(plan, memory);
+    tools.attachEventBus(events);
     tools.attachRepositoryMemory(repositoryMemory);
     tools.attachSandboxManager(sandbox);
     tools.attachTaskManager(tasks);

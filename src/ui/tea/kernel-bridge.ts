@@ -3,7 +3,7 @@ import type { KernelMsg, Msg } from './types.js';
 export const KERNEL_EVENT_NAMES = [
   'kernel:init', 'kernel:disposed', 'plugin:registered', 'step:before', 'step:after',
   'router:decision', 'gate:exploration_sufficiency', 'gate:reproduction_advisory',
-  'tool:before', 'tool:after', 'tool:error', 'model:thought', 'model:thinking:start',
+  'tool:before', 'tool:after', 'tool:error', 'tool:stream', 'model:thought', 'model:thinking:start',
   'model:thinking:end', 'model:retry', 'model:token', 'model:usage', 'model:request_telemetry',
   'tools:batch', 'model:final_answer', 'model:steered', 'workspace:changed', 'model:changed',
   'agent:status', 'agent/status', 'agent:abort', 'abort', 'prompt:prefix-churn',

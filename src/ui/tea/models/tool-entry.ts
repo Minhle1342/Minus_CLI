@@ -8,6 +8,8 @@ const MAX_RESULT_LINES = 5;
 /** Read-only tools render as a single TUI line (call + result); mutations keep full detail. */
 const MAX_COMPACT_SUMMARY_CHARS = 120;
 const MAX_COMPACT_TARGET_CHARS = 100;
+/** Live tool log: keep the most recent N lines (film strip, newest at the bottom). */
+const MAX_STREAM_LINES = 6;
 
 export function isReadOnlyTool(name: string): boolean {
   return CONCURRENT_READ_ONLY_TOOLS.has(name);
@@ -25,6 +27,22 @@ function resultPreview(text: string): string {
   return lines.length > MAX_RESULT_LINES
     ? `${shown}\n… (${lines.length - MAX_RESULT_LINES} lines omitted)`
     : shown;
+}
+
+/** Film-strip preview: keep only the last MAX_STREAM_LINES lines, newest at the bottom. */
+function streamingPreview(lines: string[]): string {
+  const shown = lines.slice(-MAX_STREAM_LINES);
+  const dropped = lines.length - MAX_STREAM_LINES;
+  const body = shown.map((l) => preview(l, MAX_RESULT_CHARS)).join('\n');
+  return dropped > 0 ? `… (${dropped} earlier lines omitted)\n${body}` : body;
+}
+
+/** Return only the last MAX_STREAM_LINES lines of a multi-line tool text (film strip). */
+export function streamLinesBody(text: string): string {
+  const lines = text.split(/\r?\n/);
+  const shown = lines.slice(-MAX_STREAM_LINES);
+  const dropped = lines.length - MAX_STREAM_LINES;
+  return dropped > 0 ? `… (${dropped} earlier lines omitted)\n${shown.join('\n')}` : text;
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {
@@ -219,6 +237,14 @@ export function toolResultEntry(name: string, result: Record<string, unknown>, _
   // không lặp lại full FAIL block — chi tiết xem ở lần block đầu tiên.
   if ((result as any)?.deduped === true) {
     return paintStatus(`${heading} · repeated block suppressed (see first occurrence)`, denied, failed);
+  }
+
+  // Live tool log (run_command build/test): render only the last MAX_STREAM_LINES
+  // lines (film strip). result.lines carries the streamed output lines.
+  const streamLines = Array.isArray(result?.lines) ? (result.lines as string[]) : undefined;
+  if (streamLines) {
+    const body = streamingPreview(streamLines);
+    return body ? paintStatus(`${heading}\n${body}`, denied, failed) : paintStatus(heading, denied, failed);
   }
 
   // TUI: read-only success collapses to ONE line (no body) so the viewport

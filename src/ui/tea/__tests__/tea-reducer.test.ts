@@ -177,4 +177,21 @@ test('statusline surfaces tool + step + retry statuses besides phase', () => {
   assert.ok(ansi.includes('224;175;104'), 'retry segment yellow');
 });
 
+test('tool:stream appends lines to live run_command entry; tool:after replaces with result', () => {
+  let model = createRootModel();
+  [model] = update({ type: 'kernel', event: 'tool:before', args: ['run_command', { command: 'npm test' }] }, model);
+  assert.equal(model.viewport.entries.length, 1);
+  [model] = update({ type: 'kernel', event: 'tool:stream', args: ['run_command', 'PASS src/a.test.ts', 0, false] }, model);
+  [model] = update({ type: 'kernel', event: 'tool:stream', args: ['run_command', 'PASS src/b.test.ts', 1, false] }, model);
+  // Still ONE entry — stream lines appended into the live call entry
+  assert.equal(model.viewport.entries.length, 1);
+  const stripped = stripTerminalControls(model.viewport.entries[0].text);
+  assert.ok(stripped.includes('PASS src/a.test.ts'));
+  assert.ok(stripped.includes('PASS src/b.test.ts'));
+  // tool:after replaces the live call entry (carrying stream lines) with the final result
+  [model] = update({ type: 'kernel', event: 'tool:after', args: ['run_command', { success: true, lines: ['PASS src/a.test.ts', 'PASS src/b.test.ts'], exitCode: 0 }, 5, {}] }, model);
+  assert.equal(model.viewport.entries.length, 1);
+  assert.ok(stripTerminalControls(model.viewport.entries[0].text).includes('✔ run_command [OK]'));
+});
+
 

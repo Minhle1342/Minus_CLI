@@ -109,6 +109,7 @@ export class ToolRegistry implements ToolProvider {
   private sandboxManager?: any;
   private taskManager?: any;
   private permissionManager?: any;
+  private eventsBus?: any;
 
   constructor(
     _planManager?: any,
@@ -178,12 +179,12 @@ export class ToolRegistry implements ToolProvider {
 
   attachSandboxManager(sandboxManager: any): void {
     this.sandboxManager = sandboxManager;
-    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager, this.eventsBus));
   }
 
   attachTaskManager(taskManager: any): void {
     this.taskManager = taskManager;
-    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager, this.eventsBus));
     // Registered but hidden from default declarations (LAZY_TOOL_NAMES) —
     // it unlocks after a background-task notice is claimed.
     this.register(createManageTaskTool(taskManager));
@@ -191,7 +192,13 @@ export class ToolRegistry implements ToolProvider {
 
   attachPermissionManager(permissionManager: any): void {
     this.permissionManager = permissionManager;
-    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager));
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager, this.eventsBus));
+  }
+
+  attachEventBus(events: any): void {
+    this.eventsBus = events;
+    // Re-register run_command so it carries the event bus for live log streaming.
+    this.register(createRunCommandTool(this.sandboxManager, this.taskManager, this.permissionManager, this.eventsBus));
   }
 
   attachScheduleManager(_scheduleManager: any): void {

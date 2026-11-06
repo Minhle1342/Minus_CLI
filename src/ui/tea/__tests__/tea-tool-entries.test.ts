@@ -119,3 +119,29 @@ test('background tool call heading is muted gray and background result keeps sta
   assert.ok(bgFail.includes('✖ run_command [FAIL]'));
   assert.ok(bgFail.includes('boom'));
 });
+
+test('toolResultEntry renders live tool log as film strip (≤6 lines, newest at bottom)', () => {
+  const lines = ['line 1', 'line 2', 'line 3', 'line 4', 'line 5', 'line 6', 'line 7', 'line 8'];
+  const out = toolResultEntry('run_command', { success: true, lines, exitCode: 0 }, 5, { command: 'npm test' }).replace(/\x1b\[[0-9;]*m/g, '');
+  assert.ok(out.includes('✔ run_command [OK]'), out);
+  assert.ok(out.includes('line 8'), out);
+  assert.ok(out.includes('line 3'), out);
+  assert.ok(out.includes('… (2 earlier lines omitted)'), out);
+  assert.doesNotMatch(out, /line 1/, out);
+  assert.doesNotMatch(out, /line 2/, out);
+});
+
+test('toolResultEntry film strip keeps all lines when ≤6', () => {
+  const lines = ['a', 'b', 'c'];
+  const out = toolResultEntry('run_command', { success: true, lines, exitCode: 0 }, 5, { command: 'npm test' }).replace(/\x1b\[[0-9;]*m/g, '');
+  assert.ok(out.includes('a'), out);
+  assert.ok(out.includes('c'), out);
+  assert.doesNotMatch(out, /omitted/, out);
+});
+
+test('toolResultEntry film strip shows FAIL badge with last line on failure', () => {
+  const lines = ['PASS a', 'FAIL b', '✖ error: boom'];
+  const out = toolResultEntry('run_command', { success: false, lines, exitCode: 1 }, 5, { command: 'npm test' }).replace(/\x1b\[[0-9;]*m/g, '');
+  assert.ok(out.includes('✖ run_command [FAIL]'), out);
+  assert.ok(out.includes('✖ error: boom'), out);
+});
