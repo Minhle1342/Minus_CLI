@@ -2368,10 +2368,11 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             }
 
             // Emit tool:stream per output line for live TUI log rendering (film strip).
-            // Exploration / list-file commands (rg, grep, ls, dir, cat, type, head, tail, find, fd)
-            // stay off the live strip — their output belongs to dedicated tools (read_file /
-            // list_files / search_codebase_fast), not the build/test tool-result entry.
-            const isExplorationCommand = /^(?:rg|grep|ls|dir|find|fd|cat|type|head|tail)\b/i.test(effectiveCommand);
+            // Exploration / list-file / remove commands (rg, grep, ls, dir, cat, type, head, tail,
+            // find, fd, rm, del, erase, rmdir, rd, remove-item, ri) stay off the live strip —
+            // their output belongs to dedicated tools (read_file / list_files / delete_file) or is
+            // destructive, not the build/test tool-result entry.
+            const isExplorationCommand = /^(?:rg|grep|ls|dir|find|fd|cat|type|head|tail|rm|del|erase|rmdir|rd|remove-item|ri)\b/i.test(effectiveCommand);
             if (events && typeof events.emit === 'function' && !isExplorationCommand) {
               const outLines = String(stdout ?? '').split(/\r?\n/);
               for (let i = 0; i < outLines.length; i++) {
