@@ -256,8 +256,9 @@ export function resolveGitWorkflow(input: GitWorkflowInput): GitWorkflowState | 
           inspected.add('status');
           // Latency optimization: If status reports clean working tree, unstaged & staged diffs are guaranteed empty
           const stdout = typeof payload.stdout === 'string' ? payload.stdout : '';
+          const hasShortFlag = op.args.some((arg) => ['-s', '--short', '--porcelain', '-sb'].includes(arg));
           const isClean = stdout.includes('nothing to commit, working tree clean')
-            || (op.args.includes('-s') && stdout.trim() === '');
+            || (hasShortFlag && stdout.trim() === '');
           if (isClean) {
             inspected.add('unstaged diff');
             inspected.add('staged diff');
@@ -265,15 +266,16 @@ export function resolveGitWorkflow(input: GitWorkflowInput): GitWorkflowState | 
             inspected.add('staged diff');
           }
         }
+        const isCached = op.args.includes('--cached') || op.args.includes('--staged');
         const isHeadDiff = op.name === 'diff' && op.args.some((arg) => arg.toUpperCase() === 'HEAD');
         const baselineDiff = op.name === 'diff' && op.args.every((arg) => arg.startsWith('-') || arg.toUpperCase() === 'HEAD')
           && !op.args.some((arg) => ['--quiet', '--check', '--no-index', '--'].includes(arg));
         if (baselineDiff) {
-          if (isHeadDiff) {
+          if (isHeadDiff && !isCached) {
             inspected.add('unstaged diff');
             inspected.add('staged diff');
           } else {
-            inspected.add(op.args.includes('--cached') || op.args.includes('--staged') ? 'staged diff' : 'unstaged diff');
+            inspected.add(isCached ? 'staged diff' : 'unstaged diff');
           }
         }
         const isBranchOnlyWorkflow = branchOps.length > 0 && !scope.commit && !scope.implement && !scope.pr && !syncOps.length;

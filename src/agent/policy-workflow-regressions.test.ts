@@ -53,6 +53,25 @@ test('clean git status output auto-satisfies diffs without extra round-trips', (
   assert.equal(state.stage, 'Commit');
 });
 
+test('clean git status with --short or --porcelain auto-satisfies diffs', () => {
+  const request = 'please git add and git commit';
+  const shortOutcome = outcome(2, 'git status --short', { stdout: '' });
+  const state1 = workflow(request, [shortOutcome]);
+  assert.equal(state1.stage, 'Commit');
+
+  const porcelainOutcome = outcome(2, 'git status --porcelain', { stdout: '\n' });
+  const state2 = workflow(request, [porcelainOutcome]);
+  assert.equal(state2.stage, 'Commit');
+});
+
+test('git diff --cached HEAD only satisfies staged diff and does not bypass unstaged diff', () => {
+  const request = 'please git add and git commit';
+  const partial = [outcome(2, 'git status', { stdout: 'Changes not staged for commit:\n  modified: a.ts' }), outcome(4, 'git diff --cached HEAD')];
+  const state = workflow(request, partial);
+  assert.equal(state.stage, 'Inspect');
+  assert.deepEqual(state.pending, ['unstaged diff']);
+});
+
 test('branch-only workflow is satisfied by git status alone', () => {
   const request = 'please create branch feature/new';
   const statusOutcome = outcome(2, 'git status');
