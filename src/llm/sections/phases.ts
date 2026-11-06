@@ -30,22 +30,30 @@ export const SECTION_PHASE_PLAN_GUIDANCE = `📍 [PHASE: PLAN (ARCHITECTURAL DEC
 - Tools: Use \`run_command\` and \`read_file\` to confirm configurations, types, and logic before modifying.`;
 
 export const SECTION_PHASE_IMPLEMENT_GUIDANCE = `📍 [PHASE: IMPLEMENT (BOUNDED COHERENT MUTATION)]:
-- Goal: Apply minimal, surgical code modifications strictly restoring the intended invariant.
+- Goal: Apply the smallest coherent code change strictly restoring the intended invariant.
+- Reproduction & Verification Integrity:
+  * Bugfix/security: observe the failing check or minimal reproduction before editing, keeping that command for the post-fix check.
+  * Never weaken verification: never delete, skip, or loosen tests or assertions to force a pass; report any genuinely incorrect test.
+  * Inline validation: after each coherent mutation batch, run the cheapest falsifying check via \`run_command\` (targeted test, lint, or typecheck) before widening scope.
 - Primary Mutation Tools:
   * Use \`replace_text\` with \`expectedFileHash\` and unique anchor lines for modifying existing files.
   * Use \`write_file\` for creating new files or full file rewrites; ${FILE_MUTATION_SAFETY_RULE}
 - In-Flight Safety:
   * Inspect target lines with \`read_file\` for contentHash and line offsets before modifying.
-  * Avoid unrelated or speculative rewrites.`;
+  * Smallest coherent change: avoid unrelated or speculative rewrites of adjacent code.`;
 
 export const SECTION_PHASE_VERIFY_GUIDANCE = `📍 [PHASE: VERIFY (EMPIRICAL VERIFICATION)]:
-- Goal: Verify the changes with the check appropriate to their risk, plus diff review.
+- Goal: Verify the changes with fresh empirical evidence appropriate to risk, plus diff audit.
 - Scope: run the tests/scenarios covering the code just changed (pick by changed files / blast radius); skip unrelated suites. Widen to the full suite only when the risk or the user requires it.
-- Verification Tools:
-  * Use \`run_command\` to run the applicable build or test check (e.g. \`npm run build\`, \`tsc\`, \`npm test\`, \`cargo test\`, \`pytest\`).
-  * Scoped Test Execution: For test commands, scope directly to affected test files or test name patterns (e.g. \`node --test path/to/file.test.ts\`, \`npm test -- -t "test name"\`, \`pytest -k "test_name"\`) or use fail-fast flags (\`--bail\`, \`--onlyFailures\`, \`--reporter=min\`) to isolate failures cleanly without drowning in passing log spam.
-  * Use \`run_command "git diff"\` to inspect working tree changes.
-- Completion: Report clear evidence of the check actually run and the observed diff.`;
+- Evidence Principles:
+  * Fresh: the decisive check runs via \`run_command\` after the latest edit; earlier green runs are stale.
+  * Mapped: map each claim to the exact \`run_command\` execution, its scope, and observed outcome (non-zero, blocked, dry-run, or background-start is not a pass).
+  * Honest: report failing or unavailable checks truthfully with what remains unverified.
+  * Fail-to-pass: for bugfix/security, demonstrate fail→pass on the same check or state why reproduction was impossible.
+  * Independent check: when a subagent or review check is available under delegation intent, ask it to falsify, not rubber-stamp.
+- Diff Audit & Tools:
+  * Audit working tree with \`run_command "git diff"\` for unintended edits, debug leftovers, and weakened assertions.
+  * Scope test commands directly to affected files or patterns (e.g. \`node --test path/to/file.test.ts\`, \`pytest -k "name"\`).`;
 
 export const SECTION_PHASE_RELEASE_GUIDANCE = `📍 [PHASE: RELEASE (USER-AUTHORIZED COMPLETION)]:
 - Goal: Provide a clear, natural final summary matching the user's language.
@@ -59,6 +67,7 @@ export interface PhaseGuidanceOptions {
   evidenceScore?: number;
   evidenceThreshold?: number;
   hasUnverifiedChanges?: boolean;
+  hasReproduction?: boolean;
   risk?: string;
   reversibility?: string;
 }
@@ -72,7 +81,7 @@ export function resolvePhaseDynamicGuidance(
     options?.taskClass, options?.risk, options?.reversibility,
     options?.hasValidatedHypothesis, options?.hasSupportedHypothesis,
     options?.evidenceSufficient, options?.evidenceScore, options?.evidenceThreshold,
-    options?.hasUnverifiedChanges,
+    options?.hasUnverifiedChanges, options?.hasReproduction,
   ]);
   const cached = phaseGuidanceCache.get(cacheKey);
   if (cached !== undefined) return cached;
@@ -114,8 +123,15 @@ function resolvePhaseDynamicGuidanceUncached(
     }
     case 'plan':
       return SECTION_PHASE_PLAN_GUIDANCE;
-    case 'implement':
+    case 'implement': {
+      if (options?.taskClass === 'bugfix' || options?.taskClass === 'security') {
+        const reproLine = options.hasReproduction
+          ? '\n✔ Pre-fix failure reproduced. Apply the smallest fix restoring the invariant, then re-run the same check.'
+          : '\n⚠️ Bugfix/security: observe the failing test or reproduction check via run_command before editing product files.';
+        return `${SECTION_PHASE_IMPLEMENT_GUIDANCE}${reproLine}`;
+      }
       return SECTION_PHASE_IMPLEMENT_GUIDANCE;
+    }
     case 'verify':
       return `${SECTION_PHASE_VERIFY_GUIDANCE}\n\n${resolveVerifyPlaybookPrompt(options?.risk)}`;
     case 'release':

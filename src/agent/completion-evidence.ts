@@ -222,6 +222,19 @@ export function isCompletionEvidenceGateEnabled(
   return !(raw === 'off' || raw === '0' || raw === 'false' || raw === 'no' || raw === 'disabled');
 }
 
+/**
+ * Kill-switch for the fail-to-pass reproduction requirement in CompletionEvidenceGate.
+ * `MINUS_FAIL_TO_PASS_GATE=off|0|false|no|disabled` relaxes the pre-fix failure requirement,
+ * falling back to allowing post-fix verifications to count as sufficient proof.
+ */
+export function isFailToPassGateEnabled(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const raw = env.MINUS_FAIL_TO_PASS_GATE?.trim().toLowerCase();
+  if (raw === undefined || raw === '') return true;
+  return !(raw === 'off' || raw === '0' || raw === 'false' || raw === 'no' || raw === 'disabled');
+}
+
 interface ObservedExecution {
   call: SessionEvent;
   result: SessionEvent;
@@ -312,11 +325,21 @@ export class CompletionEvidenceGate {
     if ((effectiveCodeChangeRequired || mutations.length > 0) && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
       reasons.push('No successful test/build/lint/typecheck command was observed after the latest code modification.');
     }
-    // Nới lỏng: verification pass sau mutation cuối (test/build/lint pass)
-    // được tính là reproduction đủ — không bắt buộc fail-to-pass proof riêng.
-    const hasReproProof = options.hasReproduction === true || executions.some((e) => e.kinds.includes('reproduction')) || verifications.length > 0;
+    const firstMutationSeq = mutations[0]?.result.seq ?? Number.POSITIVE_INFINITY;
+    const preFixFailure = executions.some((item) =>
+      item.result.seq < firstMutationSeq
+      && isToolResultFailure(item.payload)
+      && !isCommandOutcomeBlocked(item.payload)
+      && (item.toolName === 'run_test_suite'
+        || (item.toolName === 'run_command'
+          && isVerificationCommand(extractCommandString(item.args, item.payload)))));
+    const failToPassActive = isFailToPassGateEnabled();
+    const hasReproProof = options.hasReproduction === true
+      || preFixFailure
+      || executions.some((e) => e.kinds.includes('reproduction'))
+      || (!failToPassActive && verifications.length > 0);
     if ((options.taskClass === 'bugfix' || options.taskClass === 'security') && !hasReproProof && mutations.length > 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting) {
-      reasons.push('Bugfix resolution requires verification evidence after the fix (reproduction proof or a passing test/diagnostics run) before completion.');
+      reasons.push('Bugfix resolution requires verification evidence of the bug failing before the fix (reproduction proof or a failing test/diagnostics run before code modifications) and passing after.');
     }
 
     // Collect string fragments from executed tool results so quotes/summaries of logs are not misclassified as new claims

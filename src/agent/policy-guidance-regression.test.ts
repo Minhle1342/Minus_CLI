@@ -25,7 +25,18 @@ test('risk adjusted verification does not demand tests for R1', () => {
   const guidance = resolvePhaseDynamicGuidance('verify', { risk: 'R1' });
   assert.doesNotMatch(guidance, /passing test exit code|Targeted test suite/);
   assert.match(guidance, /verify state/);
+  assert.match(guidance, /Fresh:/);
+  assert.match(guidance, /Mapped:/);
+  assert.match(guidance, /Honest:/);
   assert.doesNotMatch(CORE_SYSTEM_PROMPT, /pushing to main -> L1 & L2 override/);
+});
+
+test('implement phase dynamic guidance requires reproduction before editing for bugfix', () => {
+  const withoutRepro = resolvePhaseDynamicGuidance('implement', { taskClass: 'bugfix', hasReproduction: false });
+  assert.match(withoutRepro, /observe the failing test or reproduction check via run_command before editing product files/);
+
+  const withRepro = resolvePhaseDynamicGuidance('implement', { taskClass: 'bugfix', hasReproduction: true });
+  assert.match(withRepro, /Pre-fix failure reproduced/);
 });
 
 test('reasoning escalation guidance does not claim a provider token grant', () => {

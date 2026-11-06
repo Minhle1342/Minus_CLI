@@ -147,10 +147,13 @@ test('resolveVerifyPlaybookPrompt provides risk-tiered verification playbooks', 
   const r2Playbook = resolveVerifyPlaybookPrompt('R2');
   assert.match(r2Playbook, /R2 TEST & DIFF/);
   assert.ok(!r2Playbook.includes('run_command(targeted test)'));
+  assert.ok(r2Playbook.includes('report exact command, scope, and outcome'));
 
   const r3Playbook = resolveVerifyPlaybookPrompt('R3');
   assert.match(r3Playbook, /DIFF AUDIT/);
   assert.match(r3Playbook, /git diff/);
   assert.ok(r3Playbook.includes('execute verification test command'));
+  assert.ok(r3Playbook.includes('fail→pass for bugfix/security'));
+  assert.ok(r3Playbook.includes('report exact command, scope, and outcome'));
 });
 

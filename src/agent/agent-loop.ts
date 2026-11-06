@@ -2399,6 +2399,7 @@ export class AgentLoop {
           evidenceSufficient: paretoEvidence.hasSufficientEvidence,
           evidenceScore: paretoEvidence.score,
           evidenceThreshold: paretoEvidence.threshold,
+          hasReproduction: this.verificationPolicy.hasReproduction(),
         });
 
         // Phase 3/4: Cognitive Task Scaffolding, Dynamic Reflection & Strategic Pivot (Layer 2 & 1)

@@ -97,7 +97,7 @@ export const SECTION_TOOL_PLAYBOOKS = `### TOOL SYNERGY PLAYBOOKS:
 
 /** Small cache-safe tail modules selected by StepPromptPolicy. */
 export const TOOL_PLAYBOOK_PROMPTS = {
-  verifyDiff: `[TOOL PLAYBOOK V - VERIFY & DIFF AUDIT]\nInspect working tree with run_command("git diff") -> execute verification test command.`,
+  verifyDiff: `[TOOL PLAYBOOK V - VERIFY & DIFF AUDIT (R3+ STRICT)]\nexecute verification test command (verify fail→pass for bugfix/security, tests covering changed code & callers) -> inspect working tree with run_command("git diff") -> report exact command, scope, and outcome.`,
 } as const;
 
 export function resolveVerifyPlaybookPrompt(risk?: string): string {
@@ -105,7 +105,7 @@ export function resolveVerifyPlaybookPrompt(risk?: string): string {
     return `[TOOL PLAYBOOK V - VERIFY (R1 INSPECTION)]\nread_file -> verify state.`;
   }
   if (risk === 'R2') {
-    return `[TOOL PLAYBOOK V - VERIFY (R2 TEST & DIFF)]\nRun the tests covering the changed code, then run_command("git diff").`;
+    return `[TOOL PLAYBOOK V - VERIFY (R2 TEST & DIFF)]\nRun the tests covering the changed code, then run_command("git diff") -> report exact command, scope, and outcome.`;
   }
   return TOOL_PLAYBOOK_PROMPTS.verifyDiff;
 }

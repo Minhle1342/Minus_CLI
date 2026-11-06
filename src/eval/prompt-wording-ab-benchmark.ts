@@ -13,7 +13,7 @@ import { execFileSync } from 'node:child_process';
 import { GoogleGenAI, Type } from '@google/genai';
 import { SECTION_ANTIGRAVITY_TOOLS } from '../llm/sections/tools.js';
 import { SECTION_ANTIGRAVITY_TOOLCHAIN_FULL, SECTION_TERMINAL_SANDBOX_FULL } from '../llm/sections/domains.js';
-import { SECTION_PHASE_IMPLEMENT_GUIDANCE } from '../llm/sections/phases.js';
+import { SECTION_PHASE_IMPLEMENT_GUIDANCE, SECTION_PHASE_VERIFY_GUIDANCE } from '../llm/sections/phases.js';
 import { SECTION_FINAL_ANSWER_RECEIPT } from '../llm/sections/completion.js';
 
 try {
@@ -63,6 +63,7 @@ const SECTIONS: Sections = {
   sandbox: { old: oldSection(PR, 'SECTION_TERMINAL_SANDBOX_FULL'), new: SECTION_TERMINAL_SANDBOX_FULL },
   toolchain: { old: oldSection(PR, 'SECTION_ANTIGRAVITY_TOOLCHAIN_FULL'), new: SECTION_ANTIGRAVITY_TOOLCHAIN_FULL },
   implement: { old: oldSection(P, 'SECTION_PHASE_IMPLEMENT_GUIDANCE'), new: SECTION_PHASE_IMPLEMENT_GUIDANCE },
+  verify: { old: oldSection(P, 'SECTION_PHASE_VERIFY_GUIDANCE'), new: SECTION_PHASE_VERIFY_GUIDANCE },
   // Frozen pre-receipt wording (core §5, pre final-answer-receipt section).
   receipt: {
     old: 'Output the answer itself, not a promise. Describe causes, changes, or verification when relevant.',
@@ -187,6 +188,37 @@ const SCENARIOS: Scenario[] = [
         return { pass: false, why: `file cited but no observed-verification phrasing: "${text.slice(0, 90)}"` };
       }
       return { pass: true, why: `cited ${cited} + observed check` };
+    },
+  },
+  {
+    id: 'bugfix-reproduce',
+    request: 'Fix the failing parser test in src/parser.ts.',
+    sections: ['implement'],
+    score: (calls) => {
+      const firstMutationIdx = calls.findIndex((c) => c.name === 'write_file' || c.name === 'replace_text' || c.name === 'delete_file' || c.name === 'move_file');
+      const firstCheckIdx = calls.findIndex((c) => c.name === 'run_command' && /\b(?:test|npm|jest|pytest|vitest|node)\b/i.test(c.args?.command || ''));
+      if (firstCheckIdx === -1) {
+        return { pass: false, why: 'no verification/test command executed to reproduce failure' };
+      }
+      if (firstMutationIdx !== -1 && firstCheckIdx > firstMutationIdx) {
+        return { pass: false, why: 'mutated code before running verification command to reproduce' };
+      }
+      return { pass: true, why: 'verification command executed before mutation' };
+    },
+  },
+  {
+    id: 'verify-freshness',
+    request: 'We modified src/math.ts. Please verify the fix and provide the final report.',
+    sections: ['verify', 'receipt'],
+    score: (calls, text) => {
+      const hasVerification = calls.some((c) => c.name === 'run_command' && /\b(?:test|npm|jest|pytest|vitest|node|diff)\b/i.test(c.args?.command || ''));
+      if (!hasVerification) {
+        return { pass: false, why: 'no verification check or git diff run' };
+      }
+      if (!/\b(passed|failed|verified|diff|ran|check|outcome|exit)\b/i.test(text)) {
+        return { pass: false, why: `verification ran but final answer does not cite evidence: "${text.slice(0, 90)}"` };
+      }
+      return { pass: true, why: 'fresh verification command run and outcome cited' };
     },
   },
 ];

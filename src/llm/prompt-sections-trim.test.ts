@@ -87,6 +87,13 @@ test('verify-phase prompts agree: targeted tests by default, no full-suite manda
   assert.ok(SECTION_PHASE_VERIFY_GUIDANCE.includes('- Scope:'), 'verify phase must state test scope');
   assert.ok(SECTION_PHASE_VERIFY_GUIDANCE.includes('skip unrelated suites'), 'verify phase must forbid burning cycles on unrelated suites');
   assert.ok(SECTION_PHASE_VERIFY_GUIDANCE.includes('Widen to the full suite only when the risk or the user requires it'), 'full suite stays opt-in by risk/user');
+  assert.ok(SECTION_PHASE_VERIFY_GUIDANCE.includes('Fresh:'), 'verify phase must require fresh checks after edits');
+  assert.ok(SECTION_PHASE_VERIFY_GUIDANCE.includes('Mapped:'), 'verify phase must require mapped evidence');
+  assert.ok(SECTION_PHASE_VERIFY_GUIDANCE.includes('Honest:'), 'verify phase must require honest reporting');
+  assert.ok(SECTION_PHASE_VERIFY_GUIDANCE.includes('git diff'), 'verify phase must include diff audit');
+  assert.ok(SECTION_PHASE_IMPLEMENT_GUIDANCE.includes('smallest coherent code change'), 'implement phase must demand smallest coherent change');
+  assert.ok(SECTION_PHASE_IMPLEMENT_GUIDANCE.includes('Never weaken verification'), 'implement phase must forbid weakening tests');
+  assert.ok(SECTION_PHASE_IMPLEMENT_GUIDANCE.includes('before editing'), 'implement phase must require reproduction before editing');
   const r2 = resolveVerifyPlaybookPrompt('R2');
   assert.ok(!r2.includes('npm test'), 'R2 playbook must not hardcode the full suite (the Scope bullet governs selection)');
   assert.ok(r2.includes('tests covering the changed code'), 'R2 playbook runs the change-relevant tests');
