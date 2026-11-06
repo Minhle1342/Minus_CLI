@@ -4,6 +4,7 @@ import {
   isEvidenceSinkTool,
   reorderScheduledToolCalls,
   partitionToolCalls,
+  isConcurrentReadOnlyTool,
   type ScheduledToolCall,
 } from './tool-execution-scheduler.js';
 
@@ -74,4 +75,54 @@ test('partitionToolCalls works seamlessly with reordered calls allowing concurre
   assert.equal(partitions[0].calls.length, 2);
   assert.equal(partitions[1].mode, 'sequential');
   assert.equal(partitions[1].calls[0].name, 'update_plan_task');
+});
+
+test('isConcurrentReadOnlyTool correctly classifies read-only vs mutating shell commands', () => {
+  assert.equal(isConcurrentReadOnlyTool('read_file', { path: 'a.ts' }), true);
+  assert.equal(isConcurrentReadOnlyTool('run_command', { command: 'rg -n "foo" .' }), true);
+  assert.equal(isConcurrentReadOnlyTool('run_command', { command: 'ls -la' }), true);
+  assert.equal(isConcurrentReadOnlyTool('run_command', { command: 'git status' }), true);
+  assert.equal(isConcurrentReadOnlyTool('run_command', { command: 'git diff' }), true);
+
+  // Mutating or test commands must NOT be classified as concurrent reads
+  assert.equal(isConcurrentReadOnlyTool('run_command', { command: 'npm test' }), false);
+  assert.equal(isConcurrentReadOnlyTool('run_command', { command: 'rm -rf dist' }), false);
+  assert.equal(isConcurrentReadOnlyTool('run_command', { command: 'git commit -m "feat"' }), false);
+  assert.equal(isConcurrentReadOnlyTool('run_command', { command: 'echo "hello" > out.txt' }), false);
+  assert.equal(isConcurrentReadOnlyTool('run_command', {}), false);
+  assert.equal(isConcurrentReadOnlyTool('replace_text', { path: 'a.ts' }), false);
+});
+
+test('partitionToolCalls allows concurrent reads for safe read-only run_command alongside read_file', () => {
+  const calls: ScheduledToolCall[] = [
+    { index: 0, id: 'c-0', name: 'read_file', args: { path: 'src/a.ts' } },
+    { index: 1, id: 'c-1', name: 'run_command', args: { command: 'rg -n "test" .' } },
+    { index: 2, id: 'c-2', name: 'run_command', args: { command: 'ls -la' } },
+    { index: 3, id: 'c-3', name: 'replace_text', args: { path: 'src/a.ts' } },
+  ];
+
+  const partitions = partitionToolCalls(calls, true);
+  assert.equal(partitions.length, 2);
+  assert.equal(partitions[0].mode, 'concurrent-read');
+  assert.equal(partitions[0].calls.length, 3);
+  assert.deepEqual(partitions[0].calls.map((c) => c.name), ['read_file', 'run_command', 'run_command']);
+  assert.equal(partitions[1].mode, 'sequential');
+  assert.equal(partitions[1].calls[0].name, 'replace_text');
+});
+
+test('partitionToolCalls treats mutating run_command as sequential barrier', () => {
+  const calls: ScheduledToolCall[] = [
+    { index: 0, id: 'c-0', name: 'run_command', args: { command: 'rg -n "foo" .' } },
+    { index: 1, id: 'c-1', name: 'run_command', args: { command: 'npm test' } },
+    { index: 2, id: 'c-2', name: 'read_file', args: { path: 'src/b.ts' } },
+  ];
+
+  const partitions = partitionToolCalls(calls, true);
+  assert.equal(partitions.length, 3);
+  assert.equal(partitions[0].mode, 'sequential-read');
+  assert.equal(partitions[0].calls[0].id, 'c-0');
+  assert.equal(partitions[1].mode, 'sequential');
+  assert.equal(partitions[1].calls[0].id, 'c-1');
+  assert.equal(partitions[2].mode, 'sequential-read');
+  assert.equal(partitions[2].calls[0].id, 'c-2');
 });

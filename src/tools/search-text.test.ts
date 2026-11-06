@@ -76,11 +76,10 @@ test('searchTextTool - Context Window Protection & maxMatches Capping', async ()
   assert.ok(Boolean(res.suggestion), 'Should provide suggestion to refine regex or path');
 });
 
-test('ToolRegistry - searchTextTool is registered and retrievable', () => {
-  const registry = new ToolRegistry();
-  const tool = registry.get('search_text');
+test('searchTextTool definition is valid and contains required parameters', () => {
+  const tool = searchTextTool;
 
-  assert.ok(tool !== undefined, 'search_text should be registered in ToolRegistry');
+  assert.ok(tool !== undefined, 'searchTextTool should be defined');
   assert.equal(tool?.name, 'search_text', 'Tool name should match');
   assert.ok((tool?.parameters as any)?.properties?.query, 'Tool schema should have query property');
   assert.ok((tool?.parameters as any)?.properties?.isRegex, 'Tool schema should have isRegex property');

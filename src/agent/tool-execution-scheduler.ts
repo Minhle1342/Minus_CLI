@@ -1,3 +1,6 @@
+import { isReadOnlyShellCommand } from '../sandbox/sandbox-policy.js';
+import { extractCommandString } from './completion-evidence.js';
+
 export const CONCURRENT_READ_ONLY_TOOLS = new Set([
   'read_file',
   'list_files',
@@ -35,8 +38,15 @@ export interface ToolCallPartition {
   calls: ScheduledToolCall[];
 }
 
-export function isConcurrentReadOnlyTool(name: string): boolean {
-  return CONCURRENT_READ_ONLY_TOOLS.has(name);
+export function isConcurrentReadOnlyTool(name: string, args?: Record<string, unknown>): boolean {
+  if (CONCURRENT_READ_ONLY_TOOLS.has(name)) {
+    return true;
+  }
+  if (name === 'run_command' && args) {
+    const cmd = extractCommandString(args);
+    return isReadOnlyShellCommand(cmd);
+  }
+  return false;
 }
 
 export const DEFAULT_MAX_CONCURRENT_READS = 6;
@@ -75,7 +85,7 @@ export function partitionToolCalls(
   };
 
   for (const call of calls) {
-    if (isConcurrentReadOnlyTool(call.name)) {
+    if (isConcurrentReadOnlyTool(call.name, call.args)) {
       pendingReads.push(call);
       continue;
     }

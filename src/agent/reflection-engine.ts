@@ -197,7 +197,7 @@ export class ReflectionEngine {
   analyze(
     feedback: ToolExecutionFeedback,
     workspace?: Workspace,
-    context?: { hasCodeMutations?: boolean; modifiedFiles?: string[] },
+    context?: { hasCodeMutations?: boolean; modifiedFiles?: string[]; failureAttribution?: 'related' | 'unrelated' | 'ambiguous' },
   ): ReflectionAnalysis {
     const { toolName, result } = feedback;
     let isFailure = false;
@@ -261,6 +261,22 @@ export class ReflectionEngine {
       this.lastReflectionPrompt = '[VERIFIED BASELINE FAILURE]: The identical check already failed before this task edited code. Its diagnostic source is unchanged and outside the observed write set. Do not modify that unrelated file merely to make the global check green. Verification is still blocked; report the command and baseline evidence accurately.';
       return { isFailure: false, consecutiveFailures: 0, reflectionPrompt: this.lastReflectionPrompt,
         advice: 'Pre-existing out-of-scope diagnostic confirmed; verification remains failed.' };
+    }
+
+    // 0. Khi lỗi verification được xác định là không liên quan (unrelated) đến phạm vi sửa đổi
+    if ((toolName === 'run_command' || toolName === 'run_test_suite')
+      && (context?.failureAttribution === 'unrelated' || Boolean(result?._unrelated_test_failure))) {
+      this.lastDetectiveReport = undefined;
+      this.lastRenderedDetectiveFingerprint = undefined;
+      this.failureSignatureStreak = undefined;
+      this.lastReflectionPrompt = undefined;
+      return {
+        isFailure: false,
+        consecutiveFailures: this.consecutiveFailures,
+        reflectionPrompt: undefined,
+        isStagnant: false,
+        advice: 'Verification failed on unrelated files out of current turn scope (suppressed reflection).',
+      };
     }
 
     // 1. Lỗi môi trường/runtime cần hướng dẫn khắc phục, không phải phân tích stack trace mã nguồn.

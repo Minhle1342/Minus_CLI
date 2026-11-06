@@ -113,3 +113,89 @@ test('fail-to-pass: docs-only mutation is allowed without reproduction', () => {
   assert.equal(decision.allow, true);
 });
 
+test('unrelated test failure: gate rejects answer when final answer omits mentioning unrelated test failure', () => {
+  const gate = new CompletionEvidenceGate();
+  const session = new Session();
+
+  record(session, 1, 'replace_text', { filePath: 'src/feature.ts', find: 'a', replace: 'b' }, { success: true });
+  record(
+    session,
+    1,
+    'run_command',
+    { command: 'npm test -- src/test.ts' },
+    {
+      processStarted: true,
+      exitCode: 1,
+      commandOutcome: 'failed_unexpected',
+      _unrelated_test_failure: '⚠️ [UNRELATED TEST FAILURE]: Verification command failed on unrelated files.',
+    },
+  );
+  record(session, 1, 'run_command', { command: 'npx tsc --noEmit' }, { processStarted: true, exitCode: 0, commandOutcome: 'succeeded' });
+
+  // Answer only mentions tsc passing, completely omitting the unrelated test failure
+  const decision = gate.evaluate(
+    'Tôi đã hoàn tất việc sửa code và npx tsc --noEmit đã hoàn thành thành công.',
+    session,
+    { turn: 1, taskClass: 'feature' },
+  );
+
+  assert.equal(decision.allow, false);
+  assert.ok(decision.reasons.some((r) => r.includes('A verification command failed during this turn due to an unrelated/pre-existing failure')));
+  assert.equal(decision.recovery, 'revise-answer');
+});
+
+test('unrelated test failure: gate accepts answer when final answer discloses unrelated test failure (English & Vietnamese)', () => {
+  const gate = new CompletionEvidenceGate();
+
+  // Test Vietnamese disclosure
+  {
+    const sessionVi = new Session();
+    record(sessionVi, 1, 'replace_text', { filePath: 'src/feature.ts', find: 'a', replace: 'b' }, { success: true });
+    record(
+      sessionVi,
+      1,
+      'run_command',
+      { command: 'npm test' },
+      {
+        processStarted: true,
+        exitCode: 1,
+        _unrelated_test_failure: '⚠️ [UNRELATED TEST FAILURE]: Verification command failed on unrelated files.',
+      },
+    );
+    record(sessionVi, 1, 'run_command', { command: 'npx tsc --noEmit' }, { processStarted: true, exitCode: 0, commandOutcome: 'succeeded' });
+
+    const decisionVi = gate.evaluate(
+      'Đã hoàn thành sửa mã nguồn. Lưu ý: Lệnh kiểm thử npm test bị thất bại nhưng lỗi này không liên quan đến phạm vi sửa đổi.',
+      sessionVi,
+      { turn: 1, taskClass: 'feature' },
+    );
+    assert.equal(decisionVi.allow, true);
+  }
+
+  // Test English disclosure
+  {
+    const sessionEn = new Session();
+    record(sessionEn, 1, 'replace_text', { filePath: 'src/feature.ts', find: 'a', replace: 'b' }, { success: true });
+    record(
+      sessionEn,
+      1,
+      'run_command',
+      { command: 'npm test' },
+      {
+        processStarted: true,
+        exitCode: 1,
+        _unrelated_test_failure: '⚠️ [UNRELATED TEST FAILURE]: Verification command failed on unrelated files.',
+      },
+    );
+    record(sessionEn, 1, 'run_command', { command: 'npx tsc --noEmit' }, { processStarted: true, exitCode: 0, commandOutcome: 'succeeded' });
+
+    const decisionEn = gate.evaluate(
+      'I completed the code change. Note: verification test suite failed due to unrelated pre-existing failures in legacy tests.',
+      sessionEn,
+      { turn: 1, taskClass: 'feature' },
+    );
+    assert.equal(decisionEn.allow, true);
+  }
+});
+
+

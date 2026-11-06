@@ -524,6 +524,32 @@ export class CompletionEvidenceGate {
       }
     }
 
+    // Unrelated test failure honesty check:
+    // Nếu trong turn có ít nhất một lệnh verify bị fail dạng unrelated,
+    // nhưng final answer không đề cập đến việc test suite bị fail/không liên quan,
+    // gate sẽ từ chối nghiệm thu (reject) và yêu cầu model bổ sung thông tin này vào báo cáo gửi người dùng.
+    const hasUnrelatedTestFailure = executions.some((item) =>
+      Boolean(item.payload?._unrelated_test_failure)
+      || item.payload?.regressionEvidence?.classification === 'pre_existing_out_of_scope',
+    );
+
+    if (hasUnrelatedTestFailure) {
+      const mentionsFailure =
+        /\b(?:tests?|test\s+suites?|suite|kiem\s+thu|kiem\s+tra|verification|checks?)\b.{0,60}\b(?:fail|failed|failures?|failing|errors?|that\s+bai|loi|hong|khong\s+pass)\b/i.test(normalized)
+        || /\b(?:fail|failed|failures?|that\s+bai|loi|hong)\b.{0,40}\b(?:tests?|test\s+suites?|kiem\s+thu|kiem\s+tra)\b/i.test(normalized)
+        || /\b(?:loi\s+test|test\s+loi|test\s+fail|failing\s+tests?)\b/i.test(normalized);
+
+      const mentionsUnrelated =
+        /\b(?:unrelated|not\s+related|pre-?existing|out\s+of\s+scope|independent|external|baseline|prior\s+failure)\b/i.test(normalized)
+        || /\b(?:khong\s+lien\s+quan|khong\s+anh\s+huong|san\s+co|tu\s+truoc|ngoai\s+pham\s+vi|doc\s+lap|ngoai\s+le|loi\s+cu|khong\s+thuoc)\b/i.test(normalized);
+
+      if (!mentionsFailure || !mentionsUnrelated) {
+        reasons.push(
+          'A verification command failed during this turn due to an unrelated/pre-existing failure, but the final answer does not disclose this test failure. You must explicitly inform the user that a test failed and explain that it is unrelated to your changes.',
+        );
+      }
+    }
+
     if (reasons.length === 0) return { allow: true, reasons: [] };
     const missingMutation = Boolean(effectiveCodeChangeRequired && mutations.length === 0);
     const missingVerification = mutations.length > 0 && verifications.length === 0 && !allMutationsAreNonExecutable && !userExplicitlyExemptsTesting;

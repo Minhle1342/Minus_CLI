@@ -326,6 +326,74 @@ function isFdReadOnly(args: string[]): boolean {
   return !args.some(arg => ['-x', '--exec', '-X', '--exec-batch'].includes(arg));
 }
 
+/**
+ * Phân tích cú pháp AST và xác định một lệnh shell có hoàn toàn an toàn và chỉ đọc dữ liệu
+ * (không ghi đè file, không tạo tiến trình sửa đổi dữ liệu hệ thống) hay không.
+ */
+export function isReadOnlyShellCommand(command: string): boolean {
+  if (!command || !command.trim()) return false;
+  const trimmed = command.trim();
+  const analysis = parseShellAst(trimmed);
+  const SAFE_READ_ONLY_OPERATORS = new Set(['|', '&&', '||', ';', 'newline']);
+  const hasSafeOperators = analysis.operators.length === 0 || analysis.operators.every(op => SAFE_READ_ONLY_OPERATORS.has(op));
+  const isObfuscationSafe = !analysis.hasObfuscation || (
+    analysis.obfuscationReasons.length === 1 &&
+    analysis.obfuscationReasons[0] === 'Dynamic shell eval/exec detected.' &&
+    analysis.commands.some(c => c.executable.toLowerCase() === 'find')
+  );
+  return !analysis.error && !analysis.hasSubshell && hasSafeOperators && isObfuscationSafe && analysis.commands.length > 0
+    && analysis.commands.every((cmd) => {
+      if (cmd.assignments.some(assign => DANGEROUS_ENV_ASSIGNMENTS.test(assign.key))) {
+        return false;
+      }
+      if (cmd.redirects.length && !cmd.redirects.every(isSafeReadOnlyRedirect)) return false;
+      const executable = cmd.executable.toLowerCase();
+      const baseExecutable = executable.replace(/\.exe$/, '');
+      const args = cmd.args;
+      if (executable === 'git' || executable === 'git.exe') {
+        // Global config, external diff drivers and output files can change effects.
+        if (!args.length || args[0].startsWith('-') || args.some(arg => /^--(?:output|ext-diff|textconv|exec-path)(?:=|$)/i.test(arg))) return false;
+        return classifyGitCommand(args[0], args.slice(1)).risk === 'read';
+      }
+      if (executable === 'codegraph' || executable === 'codegraph.exe') {
+        return args.length > 0
+          && ['explore', 'node', 'search', 'callers', 'callees', 'impact', 'status'].includes(args[0].toLowerCase());
+      }
+      if (baseExecutable === 'env' || baseExecutable === 'printenv') return args.length === 0;
+      if (baseExecutable === 'find') {
+        return isSafeFindCommand(args);
+      }
+      if (['rg', 'ripgrep'].includes(baseExecutable) && args.some(arg => /^--pre(?:=|$)/.test(arg))) return false;
+      // CLIs whose safety depends on arguments: never trust the executable name alone.
+      if (baseExecutable === 'psql') return isPostgresReadOnly(args);
+      if (baseExecutable === 'mysql') return isMysqlReadOnly(args);
+      if (baseExecutable === 'sqlite3') return isSqliteReadOnly(args);
+      if (baseExecutable === 'mongosh' || baseExecutable === 'mongo') return isMongoReadOnly(args);
+      if (baseExecutable === 'redis-cli') return isRedisReadOnly(args);
+      if (baseExecutable === 'pg_dump') return isPgDumpReadOnly(args);
+      if (baseExecutable === 'mysqldump') return isMysqlDumpReadOnly(args);
+      if (baseExecutable === 'mongodump') return isMongoDumpReadOnly(args);
+      if (baseExecutable === 'docker' || baseExecutable === 'podman') return isDockerReadOnly(args);
+      if (baseExecutable === 'docker-compose' || baseExecutable === 'podman-compose') return isComposeReadOnly(args);
+      if (baseExecutable === 'curl') return isCurlReadOnly(args);
+      if (baseExecutable === 'wget') return isWgetReadOnly(args);
+      if (baseExecutable === 'sed') return isSedReadOnly(args);
+      if (baseExecutable === 'sort') return isSortReadOnly(args);
+      if (baseExecutable === 'uniq') return isUniqReadOnly(args);
+      if (baseExecutable === 'awk' || baseExecutable === 'gawk') return isAwkReadOnly(args);
+      if (baseExecutable === 'tree') return !args.some(arg => arg === '-o' || /^--output(?:=|$)/.test(arg));
+      if (baseExecutable === 'fd') return isFdReadOnly(args);
+      // Exclude script interpreters and executable lookup wrappers.
+      if (executable === 'node' || executable === 'node.exe') {
+        return args.length === 1 && ['-v', '--version'].includes(args[0]);
+      }
+      if (['python', 'python3', 'npm', 'npx', 'bun', 'cargo', 'go', 'dotnet'].includes(baseExecutable)) {
+        if (args.length === 1 && ['-v', '--version', '-V', 'version'].includes(args[0])) return true;
+      }
+      return SAFE_READ_ONLY_PREFIXES.some(prefix => !prefix.includes(' ') && prefix.toLowerCase() === executable);
+    });
+}
+
 
 /**
  * SandboxPolicyEngine - Bộ Thực thi Quy tắc Bảo mật & Giới hạn Ranh giới Workspace (Codex Standard)
@@ -405,65 +473,7 @@ export class SandboxPolicyEngine {
       return { allowed: false, riskLevel: 'UNAUTHORIZED_ESCAPE', reason: `Working directory "${cwd}" is outside the workspace.` };
     }
 
-    const analysis = parseShellAst(trimmed);
-    const SAFE_READ_ONLY_OPERATORS = new Set(['|', '&&', '||', ';', 'newline']);
-    const hasSafeOperators = analysis.operators.length === 0 || analysis.operators.every(op => SAFE_READ_ONLY_OPERATORS.has(op));
-    const isObfuscationSafe = !analysis.hasObfuscation || (
-      analysis.obfuscationReasons.length === 1 &&
-      analysis.obfuscationReasons[0] === 'Dynamic shell eval/exec detected.' &&
-      analysis.commands.some(c => c.executable.toLowerCase() === 'find')
-    );
-    const isReadOnly = !analysis.error && !analysis.hasSubshell && hasSafeOperators && isObfuscationSafe && analysis.commands.length > 0
-      && analysis.commands.every((command) => {
-        if (command.assignments.some(assign => DANGEROUS_ENV_ASSIGNMENTS.test(assign.key))) {
-          return false;
-        }
-        if (command.redirects.length && !command.redirects.every(isSafeReadOnlyRedirect)) return false;
-        const executable = command.executable.toLowerCase();
-        const baseExecutable = executable.replace(/\.exe$/, '');
-        const args = command.args;
-        if (executable === 'git' || executable === 'git.exe') {
-          // Global config, external diff drivers and output files can change effects.
-          if (!args.length || args[0].startsWith('-') || args.some(arg => /^--(?:output|ext-diff|textconv|exec-path)(?:=|$)/i.test(arg))) return false;
-          return classifyGitCommand(args[0], args.slice(1)).risk === 'read';
-        }
-        if (executable === 'codegraph' || executable === 'codegraph.exe') {
-          return args.length > 0
-            && ['explore', 'node', 'search', 'callers', 'callees', 'impact', 'status'].includes(args[0].toLowerCase());
-        }
-        if (baseExecutable === 'env' || baseExecutable === 'printenv') return args.length === 0;
-        if (baseExecutable === 'find') {
-          return isSafeFindCommand(args);
-        }
-        if (['rg', 'ripgrep'].includes(baseExecutable) && args.some(arg => /^--pre(?:=|$)/.test(arg))) return false;
-        // CLIs whose safety depends on arguments: never trust the executable name alone.
-        if (baseExecutable === 'psql') return isPostgresReadOnly(args);
-        if (baseExecutable === 'mysql') return isMysqlReadOnly(args);
-        if (baseExecutable === 'sqlite3') return isSqliteReadOnly(args);
-        if (baseExecutable === 'mongosh' || baseExecutable === 'mongo') return isMongoReadOnly(args);
-        if (baseExecutable === 'redis-cli') return isRedisReadOnly(args);
-        if (baseExecutable === 'pg_dump') return isPgDumpReadOnly(args);
-        if (baseExecutable === 'mysqldump') return isMysqlDumpReadOnly(args);
-        if (baseExecutable === 'mongodump') return isMongoDumpReadOnly(args);
-        if (baseExecutable === 'docker' || baseExecutable === 'podman') return isDockerReadOnly(args);
-        if (baseExecutable === 'docker-compose' || baseExecutable === 'podman-compose') return isComposeReadOnly(args);
-        if (baseExecutable === 'curl') return isCurlReadOnly(args);
-        if (baseExecutable === 'wget') return isWgetReadOnly(args);
-        if (baseExecutable === 'sed') return isSedReadOnly(args);
-        if (baseExecutable === 'sort') return isSortReadOnly(args);
-        if (baseExecutable === 'uniq') return isUniqReadOnly(args);
-        if (baseExecutable === 'awk' || baseExecutable === 'gawk') return isAwkReadOnly(args);
-        if (baseExecutable === 'tree') return !args.some(arg => arg === '-o' || /^--output(?:=|$)/.test(arg));
-        if (baseExecutable === 'fd') return isFdReadOnly(args);
-        // Exclude script interpreters and executable lookup wrappers.
-        if (executable === 'node' || executable === 'node.exe') {
-          return args.length === 1 && ['-v', '--version'].includes(args[0]);
-        }
-        if (['python', 'python3', 'npm', 'npx', 'bun', 'cargo', 'go', 'dotnet'].includes(baseExecutable)) {
-          if (args.length === 1 && ['-v', '--version', '-V', 'version'].includes(args[0])) return true;
-        }
-        return SAFE_READ_ONLY_PREFIXES.some(prefix => !prefix.includes(' ') && prefix.toLowerCase() === executable);
-      });
+    const isReadOnly = isReadOnlyShellCommand(trimmed);
 
     if (isReadOnly) {
       return { allowed: true, riskLevel: 'SAFE_READ_ONLY', sanitizedCommand: trimmed };

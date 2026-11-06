@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { extractHypothesisFromReasoning, isTestFailureRelatedToCurrentTurn, AgentLoop } from './agent-loop.js';
 import { HypothesisTracker } from './hypothesis-tracker.js';
+import { ReflectionEngine } from './reflection-engine.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { Session } from '../session/session.js';
 import { Workspace } from '../workspace/workspace.js';
@@ -214,7 +215,40 @@ test('AgentLoop does NOT rollback on unrelated test failure and records notice d
     const runCmdResult = toolEvents.find((e) => e.data.toolName === 'run_command')?.data.result;
     assert.ok(runCmdResult?._unrelated_test_failure);
     assert.match(runCmdResult._unrelated_test_failure, /UNRELATED TEST FAILURE/);
+
+    // Verify _system_reflection_prompt and _system_cognitive_brake are suppressed
+    assert.equal(runCmdResult?._system_reflection_prompt, undefined);
+    assert.equal(runCmdResult?._system_cognitive_brake, undefined);
   } finally {
     await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
   }
 });
+
+test('ReflectionEngine suppresses reflection prompt, stagnant defect, and consecutive failures on unrelated test failure', () => {
+  const engine = new ReflectionEngine();
+
+  const feedback = {
+    toolName: 'run_command',
+    args: { command: 'npm test' },
+    result: {
+      exitCode: 1,
+      stdout: 'FAIL test/unrelated.test.ts\nAssertionError: false !== true',
+      stderr: 'Command failed: npm test',
+      _unrelated_test_failure: '⚠️ [UNRELATED TEST FAILURE]: Test failed on unrelated files.',
+    },
+    durationMs: 1500,
+  };
+
+  const analysis = engine.analyze(feedback, undefined, {
+    hasCodeMutations: true,
+    modifiedFiles: ['src/feature.ts'],
+    failureAttribution: 'unrelated',
+  });
+
+  assert.equal(analysis.isFailure, false);
+  assert.equal(analysis.reflectionPrompt, undefined);
+  assert.equal(analysis.isStagnant, false);
+  assert.equal(analysis.consecutiveFailures, 0);
+  assert.equal(engine.getLastDetectiveReport(), undefined);
+});
+

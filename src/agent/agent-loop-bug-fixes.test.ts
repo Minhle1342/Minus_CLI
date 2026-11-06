@@ -473,5 +473,58 @@ describe('AgentLoop Bug Fixes Verification', () => {
       await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
     }
   });
+
+  it('executes safe read-only run_command in parallel with read_file in concurrent mode', async () => {
+    const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'parallel-run-cmd-'));
+    try {
+      const workspace = new Workspace(rootDir);
+      await fs.writeFile(path.join(rootDir, 'a.ts'), 'export const a = 1;\n');
+
+      const llm = new ScriptedCompletionLLM([
+        {
+          text: '',
+          toolCalls: [
+            { id: 'call-a', name: 'read_file', args: { path: 'a.ts' } },
+            { id: 'call-b', name: 'run_command', args: { command: 'rg -n "export" .' } },
+          ],
+        },
+        { text: 'Inspection completed.', toolCalls: [] },
+      ]);
+
+      const registry = new ToolRegistry();
+      registry.register({
+        name: 'read_file',
+        description: 'Read file',
+        parameters: { type: 'object', properties: { path: { type: 'string' } } } as any,
+        execute: async (args: any) => ({ content: `file: ${args.path}` }),
+      });
+      registry.register({
+        name: 'run_command',
+        description: 'Run command',
+        parameters: { type: 'object', properties: { command: { type: 'string' } } } as any,
+        execute: async (args: any) => ({ output: `searched: ${args.command}`, exitCode: 0 }),
+      });
+
+      const loop = new AgentLoop(llm as any, registry, {
+        workspace,
+        enableConcurrentReadTools: true,
+        maxSteps: 3,
+      });
+
+      const session = new Session('session-parallel-run-cmd');
+      session.addUserMessage('Inspect code with read_file and run_command in parallel.');
+      await loop.run(session);
+
+      const toolResults = session.getEvents().filter((e) => e.type === 'tool/result');
+      assert.equal(toolResults.length, 2, 'both read_file and read-only run_command must complete');
+
+      const batchDecisions = session.getEvents().filter(
+        (e) => e.type === 'control/decision' && (e.data as any)?.controlDecision?.count === 2,
+      );
+      assert.equal(batchDecisions.length, 1, 'both tools must be batched together as concurrent reads');
+    } finally {
+      await fs.rm(rootDir, { recursive: true, force: true }).catch(() => {});
+    }
+  });
 });
 

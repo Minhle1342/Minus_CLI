@@ -3510,7 +3510,10 @@ export class AgentLoop {
                       turn,
                       userRequest: turnUserRequest,
                       signal: options?.signal,
+                      lastCommandExecution: this.lastCommandExecutionState,
                       controlMode: toolControlMode,
+                      inbox: this.inbox,
+                      ...(isSubagent ? { isSubagent: true } : {}),
                       ...(toolControlMode !== 'off' ? {
                         decisionId: activeDecisionId,
                         allowedToolNames: authorizedToolNames,
@@ -4143,6 +4146,14 @@ export class AgentLoop {
             // Phân tích kết quả qua ReflectionEngine (Tự vấn & Debugging Protocol + LSP Diagnostics)
             const hasMutationsSoFar = getTurnCompletionState(session, turn).hasMutations
               || hasObservedMutation(toolName, executionResult.result);
+            const verificationRun = verificationCommandFor(toolName, toolArgs, executionResult.result);
+            const earlyAttribution = (verificationRun && this.targetFilesModifiedInTurn.size > 0 && isToolResultFailure(executionResult.result))
+              ? isTestFailureRelatedToCurrentTurn(
+                  this.targetFilesModifiedInTurn,
+                  executionResult.result,
+                  executionResult.result?.regressionEvidence,
+                )
+              : undefined;
             const reflectionAnalysis = this.reflectionEngine.analyze({
               toolName,
               args: toolArgs,
@@ -4151,6 +4162,7 @@ export class AgentLoop {
             }, this._workspace, {
               hasCodeMutations: hasMutationsSoFar,
               modifiedFiles: Array.from(this.targetFilesModifiedInTurn),
+              failureAttribution: earlyAttribution,
             });
             // Cascade-repair freeze: latch when ≥3 consecutive failures share one
             // error signature; auto-clears when the signature changes or success
@@ -4480,7 +4492,6 @@ export class AgentLoop {
               }
             }
 
-            const verificationRun = verificationCommandFor(toolName, toolArgs, executionResult.result);
             if (verificationRun && this.targetFilesModifiedInTurn.size > 0) {
               this.hypothesisTracker.markTesting();
               const isVerifOk = !isToolResultFailure(executionResult.result) && executionResult.result?.exitCode === 0;
@@ -4491,7 +4502,7 @@ export class AgentLoop {
                   this.hypothesisTracker.markValidated(activeH.id, `Verified with ${verificationRun}`);
                 }
               } else {
-                const attribution = isTestFailureRelatedToCurrentTurn(
+                const attribution = earlyAttribution || isTestFailureRelatedToCurrentTurn(
                   this.targetFilesModifiedInTurn,
                   executionResult.result,
                   executionResult.result?.regressionEvidence,
@@ -4546,15 +4557,19 @@ export class AgentLoop {
               }
             }
 
+            const isUnrelatedFailure = (earlyAttribution === 'unrelated')
+              || Boolean(executionResult.result?._unrelated_test_failure);
             const activeHypothesis = this.hypothesisTracker.getActiveHypothesis();
             const falsifiedCount = this.hypothesisTracker.getFalsifiedHypotheses().length;
-            const cognitiveBrake = this.cognitiveHarness.evaluateCognitiveBrake({
-              consecutiveFailures: reflectionAnalysis.consecutiveFailures,
-              hypothesisFailedCount: falsifiedCount,
-              currentHypothesis: activeHypothesis?.statement,
-            });
+            const cognitiveBrake = isUnrelatedFailure
+              ? { active: false, reason: undefined, recommendedPivot: undefined }
+              : this.cognitiveHarness.evaluateCognitiveBrake({
+                  consecutiveFailures: reflectionAnalysis.consecutiveFailures,
+                  hypothesisFailedCount: falsifiedCount,
+                  currentHypothesis: activeHypothesis?.statement,
+                });
 
-            if (cognitiveBrake.active) {
+            if (cognitiveBrake.active && !isUnrelatedFailure) {
               CLI.renderCognitiveBrake(cognitiveBrake.reason || 'Branch Pruning', cognitiveBrake.recommendedPivot);
               if (activeHypothesis) {
                 this.hypothesisTracker.markFalsified(activeHypothesis.id, cognitiveBrake.reason || 'Branch Pruning');
@@ -4725,13 +4740,13 @@ export class AgentLoop {
               ...(executionResult.guardianDiagnosis && isToolResultFailure(executionResult.result)
                 ? { _system_guardian_recovery: `[GUARDIAN RECOVERY GUIDANCE]: Category: ${executionResult.guardianDiagnosis.category}. Action: ${executionResult.guardianDiagnosis.recoveryAction}${executionResult.guardianDiagnosis.suggestedAlternative ? ` Recommended alternative: ${executionResult.guardianDiagnosis.suggestedAlternative}` : ''}` }
                 : {}),
-              ...(reflectionAnalysis.reflectionPrompt
+              ...(reflectionAnalysis.reflectionPrompt && !isUnrelatedFailure
                 ? { _system_reflection_prompt: reflectionAnalysis.reflectionPrompt }
                 : {}),
-              ...(failureInvestigation
+              ...(failureInvestigation && !isUnrelatedFailure
                 ? { _system_failure_investigation: failureInvestigation }
                 : {}),
-              ...(cognitiveBrake.active
+              ...(cognitiveBrake.active && !isUnrelatedFailure
                 ? { _system_cognitive_brake: `🛑 [COGNITIVE BRAKE ACTIVATED]: ${cognitiveBrake.reason}. ${cognitiveBrake.recommendedPivot}` }
                 : {}),
               ...(progressDecision.message
