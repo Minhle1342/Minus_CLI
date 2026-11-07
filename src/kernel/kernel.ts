@@ -122,8 +122,8 @@ export interface KernelEvents {
   'model:changed': (newModel: string, ctx?: SessionEventContext) => void;
   'agent:status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number; name?: string; label?: string; isSubagent?: boolean }) => void;
   'agent/status': (record: { id: string; status: string; sessionId?: string; turn?: number; step?: number; name?: string; label?: string; isSubagent?: boolean }) => void;
-  'agent:abort': () => void;
-  'abort': () => void;
+  'agent:abort': (ctx?: { sessionId?: string }) => void;
+  'abort': (ctx?: { sessionId?: string }) => void;
 }
 
 /** Typed event surface for plugins and live agent observers. */
@@ -346,13 +346,14 @@ export class AgentKernel {
     };
   }
 
-  abort(): void {
-    this.ctx.events.emit('agent:abort');
-    this.ctx.events.emit('abort');
+  /** Cancel running work. Scope it to one session so other tabs keep running. */
+  abort(sessionId?: string): void {
+    this.ctx.events.emit('agent:abort', { sessionId });
+    this.ctx.events.emit('abort', { sessionId });
   }
 
-  cancelCurrentTask(): void {
-    this.abort();
+  cancelCurrentTask(sessionId?: string): void {
+    this.abort(sessionId);
   }
 
   /**

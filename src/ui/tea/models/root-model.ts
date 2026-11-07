@@ -646,7 +646,10 @@ function reduce(msg: Msg, model: RootModel): [RootModel, Cmd[]] {
         }
       }
       if (msg.key === 'ctrl+c' || (msg.key === 'escape' && model.status.busy && model.focus === 'composer')) {
-        if (model.status.aborting) return [model, []];
+        if (model.status.aborting) {
+          if (msg.key === 'ctrl+c') return action(model, 'quit');
+          return [model, []];
+        }
         if (!model.status.busy) return action(model, 'quit');
         return [{ ...model, status: { ...model.status, aborting: true, notice: 'Stopping…' } }, [{ type: 'abort' }]];
       }

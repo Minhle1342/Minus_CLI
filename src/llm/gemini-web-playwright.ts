@@ -12,7 +12,7 @@ export interface GeminiWebPage {
   responseText(): Promise<string>;
 }
 
-export type PageProvider = () => Promise<GeminiWebPage>;
+export type PageProvider = (signal?: AbortSignal) => Promise<GeminiWebPage>;
 
 function first(sel: string[]): string {
   return sel[0];
@@ -39,7 +39,10 @@ export async function clickSendRobust(scope: ClickScope, sels: string[]): Promis
 }
 
 /** Adapter page Playwright thật sang GeminiWebPage (selectors có fallback). */
-export async function connectChromeTab(port = 9222): Promise<GeminiWebPage> {
+export async function connectChromeTab(port = 9222, signal?: AbortSignal): Promise<GeminiWebPage> {
+  if (signal?.aborted) {
+    throw new DOMException('Connection cancelled.', 'AbortError');
+  }
   let chromium: typeof import('playwright').chromium;
   try {
     ({ chromium } = await import('playwright'));
@@ -48,8 +51,30 @@ export async function connectChromeTab(port = 9222): Promise<GeminiWebPage> {
   }
   let browser: import('playwright').Browser;
   try {
-    browser = await chromium.connectOverCDP({ endpointURL: `http://127.0.0.1:${port}` });
-  } catch {
+    const connectPromise = chromium.connectOverCDP({ endpointURL: `http://127.0.0.1:${port}`, timeout: 10000 });
+    if (signal) {
+      let onAbort: () => void = () => {};
+      const abortPromise = new Promise<never>((_, reject) => {
+        onAbort = () => reject(new DOMException('Connection cancelled.', 'AbortError'));
+        signal.addEventListener('abort', onAbort, { once: true });
+      });
+      try {
+        browser = await Promise.race([connectPromise, abortPromise]);
+      } catch (err) {
+        // Abort won the race: connectOverCDP is still in flight, and a late resolve
+        // would leak an open CDP connection. Disconnect it when it lands.
+        void connectPromise.then((late) => late.close()).catch(() => {});
+        throw err;
+      } finally {
+        signal.removeEventListener('abort', onAbort);
+      }
+    } else {
+      browser = await connectPromise;
+    }
+  } catch (err: any) {
+    if (signal?.aborted || err?.name === 'AbortError') {
+      throw new DOMException('Connection cancelled.', 'AbortError');
+    }
     throw new Error(
       `Cannot reach Chrome on port ${port}. Start Chrome with: chrome --remote-debugging-port=${port} (giữ nguyên profile để giữ đăng nhập), rồi mở gemini.google.com.`,
     );
@@ -147,17 +172,17 @@ export class PlaywrightTransport implements IWebTransport {
   private lastRoundText = '';
 
   constructor(
-    private provider: PageProvider = () => connectChromeTab(Number(process.env.GEMINI_WEB_DEBUG_PORT ?? 9222)),
+    private provider: PageProvider = (signal?: AbortSignal) => connectChromeTab(Number(process.env.GEMINI_WEB_DEBUG_PORT ?? 9222), signal),
     private opts?: { pollMs?: number; stableMs?: number; roundTimeoutMs?: number },
   ) {}
 
-  private async page(): Promise<GeminiWebPage> {
-    if (!this.cached) this.cached = await this.provider();
+  private async page(signal?: AbortSignal): Promise<GeminiWebPage> {
+    if (!this.cached) this.cached = await this.provider(signal);
     return this.cached;
   }
 
-  async *send(payload: string): AsyncIterable<string> {
-    const page = await this.page();
+  async *send(payload: string, signal?: AbortSignal): AsyncIterable<string> {
+    const page = await this.page(signal);
     await page.bringToFront();
     if (!this.protocolInstalled) {
       await this.submitAndWait(page, PROTOCOL_BOOTSTRAP);

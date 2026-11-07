@@ -277,7 +277,19 @@ export async function retryWithExponentialBackoff<T>(
   for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
     if (options.signal?.aborted) throw abortError();
     try {
-      return await fn();
+      if (!options.signal) {
+        return await fn();
+      }
+      let onAbort: () => void = () => {};
+      const aborted = new Promise<never>((_, reject) => {
+        onAbort = () => reject(abortError());
+        options.signal!.addEventListener('abort', onAbort, { once: true });
+      });
+      try {
+        return await Promise.race([fn(), aborted]);
+      } finally {
+        options.signal.removeEventListener('abort', onAbort);
+      }
     } catch (err: any) {
       if (options.signal?.aborted || err?.name === 'AbortError') throw err?.name === 'AbortError' ? err : abortError();
       lastError = err;

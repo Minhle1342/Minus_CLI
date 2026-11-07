@@ -1119,12 +1119,31 @@ export class AgentLoop {
 
   async run(session: Session, options?: { maxSteps?: number; isGoalMode?: boolean; signal?: AbortSignal; isCircuitBreakerRetry?: boolean; isRecoveryResume?: boolean }): Promise<string> {
     const previous = this.runQueues.get(session.id) || Promise.resolve('');
+    const runController = new AbortController();
+    if (options?.signal?.aborted) {
+      runController.abort();
+    } else if (options?.signal) {
+      options.signal.addEventListener('abort', () => runController.abort(), { once: true });
+    }
+    const onKernelAbort = (ctx?: { sessionId?: string }) => {
+      // A scoped abort must not stop runs owned by other sessions/tabs.
+      if (ctx?.sessionId && ctx.sessionId !== session.id) return;
+      runController.abort();
+    };
+    this.eventBus?.on('abort', onKernelAbort);
+    this.eventBus?.on('agent:abort', onKernelAbort);
+
+    const mergedOptions = {
+      ...options,
+      signal: runController.signal,
+    };
+
     const current = previous.then(
-      () => this.runInternalWithCircuitBreakerRetry(session, options),
-      () => this.runInternalWithCircuitBreakerRetry(session, options),
+      () => this.runInternalWithCircuitBreakerRetry(session, mergedOptions),
+      () => this.runInternalWithCircuitBreakerRetry(session, mergedOptions),
     ).catch(async (error) => {
       // Check if this failure was due to user cancellation (AbortSignal, SIGINT, Ctrl+C, Esc)
-      const isCancelled = options?.signal?.aborted
+      const isCancelled = mergedOptions.signal.aborted
         || error?.name === 'AbortError'
         || (typeof error?.message === 'string' && (error.message.includes('cancellation requested') || error.message.includes('COMMAND_CANCELLED') || error.message.includes('aborted')));
 
@@ -1214,6 +1233,8 @@ export class AgentLoop {
     try {
       return await current;
     } finally {
+      this.eventBus?.off('abort', onKernelAbort);
+      this.eventBus?.off('agent:abort', onKernelAbort);
       if (this.runQueues.get(session.id) === current) {
         this.runQueues.delete(session.id);
       }

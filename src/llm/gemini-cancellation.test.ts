@@ -6,6 +6,7 @@ import { Session } from '../session/session.js';
 import { AgentLoop } from '../agent/agent-loop.js';
 import { ToolRegistry } from '../tools/registry.js';
 import { Workspace } from '../workspace/workspace.js';
+import { KernelEventBus } from '../kernel/kernel.js';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -160,5 +161,94 @@ describe('LLM retry cancellation', () => {
     }, { maxRetries: 1, sleepFn: async () => {} });
     assert.equal(result, 'recovered');
     assert.equal(attempts, 2);
+  });
+
+  it('aborts an in-flight hanging call immediately when signal fires during attempt', async () => {
+    const controller = new AbortController();
+    let fnStarted!: () => void;
+    const started = new Promise<void>((resolve) => { fnStarted = resolve; });
+    let unblocked = false;
+
+    const result = retryWithExponentialBackoff(async () => {
+      fnStarted();
+      // Simulate slow / hanging network connection attempt
+      await new Promise<void>((resolve) => setTimeout(resolve, 5000));
+      unblocked = true;
+      return 'done';
+    }, { signal: controller.signal });
+
+    await finishesPromptly(started);
+    controller.abort();
+    await assert.rejects(finishesPromptly(result), { name: 'AbortError' });
+    assert.equal(unblocked, false, 'in-flight hanging promise must not block cancellation');
+  });
+
+  it('aborts agent loop execution when kernel eventBus emits abort', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kernel-cancel-'));
+    try {
+      const eventBus = new KernelEventBus();
+      const llm = new GeminiLLM('test-key');
+      let requestStarted!: () => void;
+      const started = new Promise<void>((resolve) => { requestStarted = resolve; });
+      (llm as any).client = {
+        models: {
+          generateContentStream: async ({ config }: any) => {
+            requestStarted();
+            await waitForAbort(config.abortSignal);
+          },
+        },
+      };
+      const loop = new AgentLoop(llm, new ToolRegistry(), {
+        workspace: new Workspace(root),
+        maxSteps: 2,
+        eventBus,
+      });
+      const session = new Session('cancel-via-kernel-event');
+      const result = loop.submit(session, 'Investigate a bug', 'human');
+      await finishesPromptly(started);
+      eventBus.emit('abort');
+      assert.match(await finishesPromptly(result), /cancellation requested/i);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 });
+    }
+  });
+
+  it('ignores kernel abort events scoped to another session', async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), 'kernel-cancel-scope-'));
+    try {
+      const eventBus = new KernelEventBus();
+      const llm = new GeminiLLM('test-key');
+      let requestStarted!: () => void;
+      const started = new Promise<void>((resolve) => { requestStarted = resolve; });
+      (llm as any).client = {
+        models: {
+          generateContentStream: async ({ config }: any) => {
+            requestStarted();
+            await waitForAbort(config.abortSignal);
+          },
+        },
+      };
+      const loop = new AgentLoop(llm, new ToolRegistry(), {
+        workspace: new Workspace(root),
+        maxSteps: 2,
+        eventBus,
+      });
+      const session = new Session('cancel-via-kernel-event-scoped');
+      const result = loop.submit(session, 'Investigate a bug', 'human');
+      await finishesPromptly(started);
+
+      eventBus.emit('abort', { sessionId: 'another-session' });
+      const settledEarly = await new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), 100);
+        const settle = () => { clearTimeout(timer); resolve(true); };
+        void result.then(settle, settle);
+      });
+      assert.equal(settledEarly, false, 'scoped abort for another session must not cancel this run');
+
+      eventBus.emit('abort', { sessionId: session.id });
+      assert.match(await finishesPromptly(result), /cancellation requested/i);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 150 });
+    }
   });
 });

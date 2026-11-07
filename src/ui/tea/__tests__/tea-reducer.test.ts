@@ -194,4 +194,21 @@ test('tool:stream appends lines to live run_command entry; tool:after replaces w
   assert.ok(stripTerminalControls(model.viewport.entries[0].text).includes('✔ run_command [OK]'));
 });
 
+test('ctrl+c aborts when busy and escalates to quit on repeat', () => {
+  let model = createRootModel();
+  [model] = update({ type: 'busy', busy: true }, model);
+  assert.equal(model.status.busy, true);
+
+  // 1. First ctrl+c while busy: sets aborting=true and emits abort
+  const [modelAfterFirst, effects1] = update(key('ctrl+c'), model);
+  assert.equal(modelAfterFirst.status.aborting, true);
+  assert.equal(modelAfterFirst.status.notice, 'Stopping…');
+  assert.deepEqual(effects1, [{ type: 'abort' }]);
+
+  // 2. Second ctrl+c while already aborting: escalates to quit
+  const [modelAfterSecond, effects2] = update(key('ctrl+c'), modelAfterFirst);
+  assert.deepEqual(effects2, [{ type: 'quit' }]);
+});
+
+
 

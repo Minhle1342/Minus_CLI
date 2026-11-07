@@ -3,7 +3,7 @@ import selectors from './selectors.config.json' with { type: 'json' };
 export const GEMINI_WEB_SELECTORS: Record<string, string[]> = selectors as Record<string, string[]>;
 
 export interface IWebTransport {
-  send(payload: string): AsyncIterable<string>;
+  send(payload: string, signal?: AbortSignal): AsyncIterable<string>;
   cancel(): Promise<void>;
 }
 
@@ -34,7 +34,7 @@ export class GeminiWebBridge {
     });
     try {
       let out = '';
-      const iter = this.transport.send(payload)[Symbol.asyncIterator]();
+      const iter = this.transport.send(payload, signal)[Symbol.asyncIterator]();
       const onAbort = signal
         ? new Promise<never>((_, rej) => {
             if (signal.aborted) rej(new Error('aborted'));

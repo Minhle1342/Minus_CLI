@@ -17,6 +17,7 @@ import { AnthropicLLM } from './llm/anthropic.js';
 import { FallbackRouterLLM, ProviderTier } from './llm/fallback-router.js';
 import { ToolRegistry } from './tools/registry.js';
 import { AgentLoop } from './agent/agent-loop.js';
+import { drainPostTurnQueue } from './agent/post-turn-drain.js';
 import type { PlanManager } from './agent/plan-manager.js';
 import { Session } from './session/session.js';
 import { SessionPersistence } from './session/session-persistence.js';
@@ -731,9 +732,25 @@ async function main() {
 
   // Bộ điều khiển hủy tác vụ chủ động trong lúc đang chạy (Antigravity CLI Style Cancellation)
   // ponytail: Map controller theo sessionId để các session tab chạy song song có controller riêng
-  const activeExecutionControllers = new Map<string, AbortController>();
+  const activeExecutionControllers = new Map<string, Set<AbortController>>();
+  const getActiveControllers = (sessionId?: string): AbortController[] => {
+    // Scoped lookup never falls back to other sessions: /cancel in an idle tab
+    // must not abort a task running in another tab.
+    if (sessionId) {
+      return Array.from(activeExecutionControllers.get(sessionId) ?? []);
+    }
+    if (activeSession && activeExecutionControllers.has(activeSession.id)) {
+      return Array.from(activeExecutionControllers.get(activeSession.id)!);
+    }
+    const all: AbortController[] = [];
+    for (const set of activeExecutionControllers.values()) {
+      for (const ctrl of set) all.push(ctrl);
+    }
+    return all;
+  };
   const getActiveController = (): AbortController | undefined => {
-    return (activeSession && activeExecutionControllers.get(activeSession.id)) || activeExecutionControllers.values().next().value;
+    const list = getActiveControllers();
+    return list[list.length - 1];
   };
   let lastCancellationTimestamp = 0;
   let isPromptingPermission = false;
@@ -744,7 +761,10 @@ async function main() {
     const controller = new AbortController();
     const sid = targetSessionId || activeSession?.id;
     if (sid) {
-      activeExecutionControllers.set(sid, controller);
+      if (!activeExecutionControllers.has(sid)) {
+        activeExecutionControllers.set(sid, new Set());
+      }
+      activeExecutionControllers.get(sid)!.add(controller);
     }
     // Chốt session sở hữu task lúc bắt đầu: user switch tab giữa chừng cũng
     // không làm dot busy rơi nhầm sang tab khác lúc task kết thúc.
@@ -760,10 +780,18 @@ async function main() {
       }
       throw err;
     } finally {
-      if (sid && activeExecutionControllers.get(sid) === controller) {
-        activeExecutionControllers.delete(sid);
+      if (sid) {
+        const set = activeExecutionControllers.get(sid);
+        if (set) {
+          set.delete(controller);
+          if (set.size === 0) {
+            activeExecutionControllers.delete(sid);
+            tui?.setBusy(false, runSessionId);
+          }
+        }
+      } else {
+        tui?.setBusy(false, runSessionId);
       }
-      tui?.setBusy(false, runSessionId);
     }
   };
 
@@ -980,8 +1008,25 @@ Please focus on executing and verifying this task. Report it complete only after
       });
       return getSlashCommandSuggestions(value.slice(0, cursor), 6).map(item => ({ label: item.command + ' ' + item.description, value: item.command + value.slice(cursor), cursor: item.command.length }));
     },
-    onAbort: () => { getActiveController()?.abort(); kernel.cancelCurrentTask(); },
-    onQuit: () => { isShuttingDown = true; for (const c of activeExecutionControllers.values()) c.abort(); kernel.cancelCurrentTask(); },
+    onAbort: () => {
+      // Prefer this tab's controllers; fall back to any running task (user pressed
+      // Ctrl+C/Esc as an explicit stop gesture) and keep kernel abort in sync.
+      const scoped = getActiveControllers(activeSession?.id);
+      const controllers = scoped.length > 0 ? scoped : getActiveControllers();
+      for (const c of controllers) {
+        try { c.abort(); } catch {}
+      }
+      kernel.cancelCurrentTask(scoped.length > 0 ? activeSession?.id : undefined);
+    },
+    onQuit: () => {
+      isShuttingDown = true;
+      for (const set of activeExecutionControllers.values()) {
+        for (const c of set) {
+          try { c.abort(); } catch {}
+        }
+      }
+      kernel.cancelCurrentTask();
+    },
     onMode: mode => { applyPlanMode(mode === 'PLAN'); },
     onHotModelSwitch: async (newModelName) => {
       await performHotModelSwitch(newModelName);
@@ -998,11 +1043,15 @@ Please focus on executing and verifying this task. Report it complete only after
   syncFullAccessBadge();
   const rl = tui;
   tui.on('line', (line: string) => {
-    const currentRunning = activeSession ? activeExecutionControllers.get(activeSession.id) : undefined;
-    if (!currentRunning || isPromptingPermission) return;
+    const currentRunning = activeSession ? getActiveControllers(activeSession.id) : [];
+    if (currentRunning.length === 0 || isPromptingPermission) return;
     const trimmed = line.trim(); if (!trimmed) return;
     if (['/cancel', '/stop', '/abort'].includes(trimmed)) {
-      currentRunning.abort(); agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.'); return;
+      for (const c of currentRunning) {
+        try { c.abort(); } catch {}
+      }
+      agentLoop.inbox.clear(activeSession.id, 'Cancelled by /cancel.');
+      return;
     }
     if (trimmed === '/model' || trimmed === '/modal' || trimmed.startsWith('/model ') || trimmed.startsWith('/modal ')) {
       const target = trimmed.replace(/^\/(?:model|modal)\s*/, '').trim();
@@ -3287,7 +3336,7 @@ Please focus on executing and verifying this task, and report it complete only a
           ? buildImplementationPrompt(basePrompt, agentLoop.planManager)
           : basePrompt);
 
-      void runWithCancellation(async (signal) => {
+      const dispatch = runWithCancellation(async (signal) => {
         try {
           await agentLoop.submit(taskSession, request, 'human', { signal });
           checkAndAutoCompleteGoal();
@@ -3309,23 +3358,27 @@ Please focus on executing and verifying this task, and report it complete only a
         }
       }, taskSession.id);
 
-      // Tự động rút và thực thi các câu lệnh còn lại trong hàng đợi Queued Messages (Post-turn Drain)
-      while (activeSession && agentLoop.inbox.pending(activeSession.id) > 0 && !isShuttingDown) {
-        const nextPending = agentLoop.inbox.peek(activeSession.id);
-        if (!nextPending) break;
-        console.log(`\n  ${c.bgCyan}${c.bold} ⚡ PROCESSING PENDING COMMANDS FROM THE QUEUE ${c.reset} [${nextPending.id}]`);
-        console.log(`  ${c.brightCyan}"${nextPending.text}"${c.reset}\n`);
-        sessionCount++;
-        try {
-          await runWithCancellation(async (signal) => {
-            await agentLoop.resumePending(activeSession, { signal });
-            checkAndAutoCompleteGoal();
-          });
-        } catch (drainErr: any) {
-          console.error(`\n${c.red}${c.bold}❌ Error processing the Queued Messages queue:${c.reset}`, drainErr.message);
-          break;
-        }
-      }
+      // Tự động rút và thực thi các câu lệnh còn lại trong hàng đợi Queued Messages (Post-turn Drain).
+      // Chạy SAU khi task vừa dispatch settle (controller đã được gỡ khỏi registry) để không
+      // tranh chấp với submit() đang chạy và để message còn lại có signal mới thay vì bị cancel ngay.
+      void dispatch.finally(() => drainPostTurnQueue({
+        isShuttingDown: () => isShuttingDown,
+        hasActiveRun: () => (activeExecutionControllers.get(taskSession.id)?.size ?? 0) > 0,
+        pending: () => agentLoop.inbox.pending(taskSession.id),
+        peek: () => agentLoop.inbox.peek(taskSession.id),
+        onItem: (nextPending) => {
+          console.log(`\n  ${c.bgCyan}${c.bold} ⚡ PROCESSING PENDING COMMANDS FROM THE QUEUE ${c.reset} [${nextPending.id}]`);
+          console.log(`  ${c.brightCyan}"${nextPending.text}"${c.reset}\n`);
+          sessionCount++;
+        },
+        drainNext: () => runWithCancellation(async (signal) => {
+          await agentLoop.resumePending(taskSession, { signal });
+          checkAndAutoCompleteGoal();
+        }, taskSession.id),
+        onError: (drainErr: any) => {
+          console.error(`\n${c.red}${c.bold}❌ Error processing the Queued Messages queue:${c.reset}`, drainErr?.message ?? String(drainErr));
+        },
+      }));
     }
   } finally {
     tui.close();
