@@ -5393,8 +5393,10 @@ export class AgentLoop {
           });
           {
             consecutiveIncompleteFinals++;
-            if (finalAnswer && finalAnswer.trim().length > 150 && !isCompletionStub(finalAnswer)) {
-              lastSubstantiveCandidateAnswer = finalAnswer;
+            // Record the model's own latest substantive text, never the composed
+            // prior+delta, so retries cannot accumulate duplicated analysis.
+            if (rawText.length > 150 && !isCompletionStub(rawText)) {
+              lastSubstantiveCandidateAnswer = rawText;
             }
             const isPriorAnswerSubstantive = Boolean(lastSubstantiveCandidateAnswer);
             const canRetryIncompleteFinal = consecutiveIncompleteFinals <= maxIncompleteFinalRetries;

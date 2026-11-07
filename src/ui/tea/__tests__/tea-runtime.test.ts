@@ -59,9 +59,19 @@ test('decoder handles fragmented keys and paste without submitting pasted newlin
 
   // Incomplete bracketed paste recovers cleanly after timeout
   assert.deepEqual(decoder.feed('\x1b[200~unclosed paste text', 1000), []);
-  const recovered = decoder.feed('a', 1500);
+  const recovered = decoder.feed('a', 3000);
   assert.ok(recovered.some(k => k.key === 'paste' && k.text === 'unclosed paste text'));
   assert.ok(recovered.some(k => k.key === 'a'));
+});
+
+test('decoder keeps fragmented paste chunks together across slow delivery', () => {
+  const decoder = new KeyDecoder();
+  assert.deepEqual(decoder.feed('\x1b[200~line1\n', 1000), []);
+  assert.deepEqual(decoder.feed('line2', 1500), []);
+  const paste = decoder.feed('\x1b[201~', 2000);
+  assert.equal(paste.length, 1);
+  assert.equal(paste[0].key, 'paste');
+  assert.equal(paste[0].text, 'line1\nline2');
 });
 
 test('external editor reads changes, restores terminal on child failure and removes temporary file', async () => {

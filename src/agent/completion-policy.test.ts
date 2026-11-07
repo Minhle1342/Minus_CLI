@@ -639,5 +639,16 @@ test('buildCompletionRecoveryPrompt & selectFinalAnswer prevent double response 
   assert.ok(combined.includes('Ghi chú bổ sung'));
 });
 
+test('selectFinalAnswer keeps a shorter full rewrite instead of appending stale prior text', () => {
+  const prior = 'A'.repeat(1200);
+  const rewrite = 'B'.repeat(700);
+  assert.equal(selectFinalAnswer(rewrite, undefined, undefined, prior), rewrite);
+
+  const shortDelta = 'B'.repeat(300);
+  const merged = selectFinalAnswer(shortDelta, undefined, undefined, prior);
+  assert.ok(merged.startsWith(prior));
+  assert.ok(merged.endsWith(shortDelta));
+});
+
 
 

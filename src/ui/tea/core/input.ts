@@ -1,4 +1,7 @@
 import type { KeyMsg } from '../types.js';
+/** Escape sequences arrive in one burst; bracketed paste chunks may be split by terminal buffering. */
+const ESCAPE_TIMEOUT_MS = 250;
+const PASTE_TIMEOUT_MS = 1000;
 const sequences: Record<string, string> = {
   '\x1b[A': 'up', '\x1b[B': 'down', '\x1b[C': 'right', '\x1b[D': 'left',
   '\x1b[H': 'home', '\x1b[F': 'end', '\x1bOH': 'home', '\x1bOF': 'end',
@@ -15,7 +18,7 @@ export class KeyDecoder {
   feed(data: string, now = Date.now()): KeyMsg[] {
     const messages: KeyMsg[] = [];
     const key = (name: string, text?: string) => messages.push({ type: 'key', key: name, text, now });
-    if (now - this.lastTime > 250) {
+    if (now - this.lastTime > (this.paste ? PASTE_TIMEOUT_MS : ESCAPE_TIMEOUT_MS)) {
       if (this.paste) {
         if (this.pending) {
           key('paste', this.pending);

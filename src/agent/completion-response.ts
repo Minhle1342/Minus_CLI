@@ -11,7 +11,10 @@ export interface CompletionRecoveryOptions {
   priorAnswerSubstantive?: boolean;
 }
 
-/** A substantive latest answer wins, or synthesizes a concise delta on top of a prior substantive answer. */
+/** A concise model follow-up is folded back into the recorded answer; longer rewrites stand alone. */
+const MAX_DELTA_CHARS = 600;
+
+/** A substantive latest answer wins, or synthesizes a short delta on top of a prior substantive answer. */
 export function selectFinalAnswer(
   text: string,
   report?: string,
@@ -20,13 +23,14 @@ export function selectFinalAnswer(
 ): string {
   const latest = text.trim();
   if (latest && !isCompletionStub(latest)) {
+    const prior = priorSubstantiveAnswer?.trim() || '';
     if (
-      priorSubstantiveAnswer
-      && priorSubstantiveAnswer.trim().length > 150
-      && latest.length < priorSubstantiveAnswer.trim().length * 0.6
-      && !latest.startsWith(priorSubstantiveAnswer.slice(0, 100))
+      prior.length > 150
+      && latest.length <= MAX_DELTA_CHARS
+      && latest.length < prior.length * 0.6
+      && !latest.startsWith(prior.slice(0, 100))
     ) {
-      return `${priorSubstantiveAnswer.trim()}\n\n---\n**Ghi chú bổ sung / Additional Notes:**\n${latest}`;
+      return `${prior}\n\n---\n**Ghi chú bổ sung / Additional Notes:**\n${latest}`;
     }
     return latest;
   }
