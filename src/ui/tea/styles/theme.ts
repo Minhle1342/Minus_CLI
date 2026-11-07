@@ -1,4 +1,4 @@
-﻿import stringWidth from 'string-width';
+import stringWidth from 'string-width';
 import wrapAnsi from 'wrap-ansi';
 
 export { stringWidth as displayWidth };
@@ -6,6 +6,7 @@ export { stringWidth as displayWidth };
 export function stripTerminalControls(text: string, keepColor = false): string {
   return text.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, sequence => keepColor && /^\x1b\[[\d;]*m$/.test(sequence) ? sequence : '')
+    .replace(/\x1b\([A-Za-z0-9]/g, '')
     .replace(/\x1b[^\x1b]?/g, sequence => keepColor && sequence === '\x1b[' ? sequence : '')
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, char => keepColor && char === '\x1b' ? char : '')
     .replace(/\r/g, '');

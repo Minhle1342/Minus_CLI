@@ -5,6 +5,7 @@ import { getNativeCore, nativeExecuteSandboxed } from '../native/index.js';
 import { sanitizeTerminalOutput } from '../tools/terminal-sanitizer.js';
 import { nativeTruncateToolOutput } from '../native/index.js';
 import { MAX_STRING_LENGTH, checkStringLength } from './output-limits.js';
+import { prependWorkspaceBinDirs } from '../security/env-scrub.js';
 
 const execAsync = promisify(exec);
 
@@ -50,8 +51,10 @@ export class LocalProcessSandbox implements ISandboxProvider {
 
     // Lọc và làm sạch biến môi trường (loại trừ các secret nhạy cảm nếu có)
     // Đồng thời ép buộc môi trường Non-Interactive (Claude Code & SWE-agent standard) để chống treo terminal
+    const rawPath = options?.env?.PATH || process.env.PATH || '';
+    const augmentedPath = prependWorkspaceBinDirs(rawPath, cwd);
     const sanitizedEnv: Record<string, string> = {
-      PATH: process.env.PATH || '',
+      PATH: augmentedPath,
       HOME: process.env.HOME || process.env.USERPROFILE || '',
       USER: process.env.USER || process.env.USERNAME || '',
       ...(process.platform === 'win32' ? {

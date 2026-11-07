@@ -63,6 +63,7 @@ export function parseRipgrepCommand(command: string): RgParsedOptions | null {
   let query: string | null = null;
   let isRegex = true;
   let ignoreCase = false;
+  let smartCase = false;
   let invertMatch = false;
   let wordRegexp = false;
   let filesWithMatchesOnly = false;
@@ -82,8 +83,10 @@ export function parseRipgrepCommand(command: string): RgParsedOptions | null {
 
     if (arg === '-i' || arg === '--ignore-case') {
       ignoreCase = true;
+      smartCase = false;
     } else if (arg === '-S' || arg === '--smart-case') {
-      ignoreCase = true; // Sẽ tự điều chỉnh nếu query có chữ hoa
+      ignoreCase = true;
+      smartCase = true;
     } else if (arg === '-s' || arg === '--case-sensitive') {
       ignoreCase = false;
     } else if (arg === '-F' || arg === '--fixed-strings' || arg === '-Q') {
@@ -150,6 +153,10 @@ export function parseRipgrepCommand(command: string): RgParsedOptions | null {
 
   if (query === null) {
     return null;
+  }
+
+  if (smartCase && query && /[A-Z]/.test(query)) {
+    ignoreCase = false;
   }
 
   if (targetPaths.length === 0) {
@@ -385,16 +392,22 @@ async function collectFiles(
           }
         }
 
-        // Kiểm tra glob đơn giản
+        // Kiểm tra glob (hỗ trợ negative glob '!pattern' và path glob)
         if (options.globFilter && options.globFilter.length > 0) {
-          const matchedGlob = options.globFilter.some((glob) => {
+          const relFromRoot = workspace.toRelativePath(fullPath).replace(/\\/g, '/');
+          const matchesPattern = (glob: string): boolean => {
             if (glob.startsWith('*.')) {
-              const targetExt = glob.slice(1);
-              return entry.name.endsWith(targetExt);
+              return entry.name.endsWith(glob.slice(1));
             }
-            return entry.name.includes(glob.replace(/\*/g, ''));
-          });
-          if (!matchedGlob) continue;
+            const cleanGlob = glob.replace(/\*/g, '');
+            return entry.name.includes(cleanGlob) || relFromRoot.includes(cleanGlob);
+          };
+
+          // Ripgrep semantics: include globs are OR-ed, exclude globs always win.
+          const includes = options.globFilter.filter(glob => !glob.startsWith('!'));
+          const excludes = options.globFilter.filter(glob => glob.startsWith('!')).map(glob => glob.slice(1));
+          const included = includes.length === 0 || includes.some(matchesPattern);
+          if (!included || excludes.some(matchesPattern)) continue;
         }
 
         outFiles.push(fullPath);

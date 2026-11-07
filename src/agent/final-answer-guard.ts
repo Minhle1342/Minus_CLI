@@ -28,6 +28,9 @@ export interface FinalAnswerGuardContext {
   hasSubmittedSolution?: boolean;
   hasCodeMutations?: boolean;
   filesModified?: string[];
+  isPlanMode?: boolean;
+  phase?: string;
+  taskClass?: string;
   workspace?: {
     rootDir: string;
     resolveSafePath?: (targetPath: string) => string;
@@ -364,8 +367,10 @@ export function verifyWorkspaceGrounding(
     const normalized = normalizeForMatching(line);
     if (/^\s*(?:```|~~~)/.test(line)) { fencedExample = !fencedExample; continue; }
     if (fencedExample || /^\s*>/.test(line)) continue;
-    const isProposal = /\b(?:propos(?:al|ed)|recommend(?:ation|ed)|pseudocode|hypothetical|for example|de xuat|phuong an|gia ma|gia dinh|vi du|minh hoa)\b/.test(normalized);
+    const isProposal = /\b(?:propos(?:al|ed)?|recommend(?:ation|ed)?|pseudocode|hypothetical|for example|de xuat|phuong an|gia ma|gia dinh|vi du|minh hoa|ke hoach|muc tieu|target files?|files? to (?:create|modify)|kien truc de xuat)\b/i.test(normalized);
     if (/^\s*#{1,6}\s/.test(line)) proposedSection = isProposal;
+    if (/^\s*(?:[-*+]|\d+\.)\s+(?:\*\*)?(?:missing|de xuat|propos(?:al|ed)?|target files?|file muc tieu)/i.test(normalized)) proposedSection = true;
+    if (/^\s*#{1,6}\s/.test(line) && !isProposal) proposedSection = false;
     if (proposedSection || isProposal || /\b(?:does not exist|doesn't exist|not found|absent|khong ton tai|chua co|khong tim thay)\b/.test(normalized)) continue;
     const add = (raw: string) => {
       let candidate = raw.trim().replace(/^<|>$/g, '').replace(/(?:#L\d+(?:-L?\d+)?|:\d+(?::\d+)?(?:-\d+)?)$/, '');
@@ -427,6 +432,9 @@ export function referencesWorkspaceCode(answer: string): boolean {
 export function evaluateArchitectureAnalysis(
   answer: string, context?: FinalAnswerGuardContext,
 ): FinalAnswerGuardDecision | undefined {
+  if (context?.isPlanMode || context?.phase === 'plan' || context?.userRequest?.includes('[PLANNING MODE REQUEST]')) {
+    return undefined;
+  }
   const grounding = verifyWorkspaceGrounding(answer, context?.workspace);
   if (grounding.invalidFiles.length) {
     if (grounding.validFiles.length >= 2 && grounding.validFiles.length > grounding.invalidFiles.length) {

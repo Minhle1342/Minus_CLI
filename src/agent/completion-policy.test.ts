@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { FinalAnswerGuard, verifyWorkspaceGrounding, hasUnfulfilledDeferredPromise, isSystemPromptEcho, stripSystemPromptEcho } from './final-answer-guard.js';
+import { FinalAnswerGuard, verifyWorkspaceGrounding, evaluateArchitectureAnalysis, hasUnfulfilledDeferredPromise, isSystemPromptEcho, stripSystemPromptEcho } from './final-answer-guard.js';
 import { CompletionEvidenceGate, isUserExplicitlyExemptingTests, isVerificationCommand } from './completion-evidence.js';
 import { collectCompletionObservations, getTurnCompletionState, hasObservedMutation } from './completion-observations.js';
 import { buildCompletionRecoveryPrompt, selectFinalAnswer } from './completion-response.js';
@@ -381,6 +381,56 @@ test('shell rm is tracked as mutation evidence and a checkpoint target', () => {
   assert.deepEqual(scopedMutationTargets('run_command', { command: 'npm test' }), []);
 });
 
+test('shell rm targets outside the workspace never reach checkpoint capture', () => {
+  const rootDir = path.resolve(os.tmpdir(), 'minus-checkpoint-root');
+  assert.deepEqual(scopedMutationTargets('run_command', { command: 'rm -rf /tmp/outside' }, rootDir), []);
+  assert.deepEqual(scopedMutationTargets('run_command', { command: 'rm -rf ../outside' }, rootDir), []);
+  assert.deepEqual(scopedMutationTargets('run_command', { command: 'rm -f tmp/a.ts' }, rootDir), ['tmp/a.ts']);
+});
+
+test('frozen file mutation keeps ANTI_FIXATION reasonCode for tool-transition steering', async () => {
+  const rootDir = await fs.mkdtemp(path.join(os.tmpdir(), 'completion-fixation-'));
+  try {
+    const workspace = new Workspace(rootDir);
+    const registry = new ToolRegistry();
+    let executed = false;
+    registry.register({
+      name: 'replace_text', description: 'edit', parameters: { type: 'OBJECT', properties: {} } as any,
+      execute: async () => { executed = true; return { success: true, filesModified: ['src/a.ts'] }; },
+    });
+    const finalText = 'The file is frozen; inspecting upstream callers instead.';
+    let loopRef: AgentLoop | undefined;
+    const llm = {
+      calls: 0,
+      async generate(): Promise<any> {
+        if (this.calls++ === 0) {
+          // Seed after AgentLoop.run() resets the cognitive harness at turn start.
+          const tracker = (loopRef as any).cognitiveHarness.fileFixationTracker;
+          tracker.recordFailure('src/a.ts', 100);
+          tracker.recordFailure('src/a.ts', 100);
+          return { toolCalls: [{ name: 'replace_text', args: { path: 'src/a.ts', oldText: 'a', newText: 'b' } }] };
+        }
+        return { text: finalText, toolCalls: [] };
+      },
+    };
+    const session = new Session('session-fixation');
+    session.addUserMessage('Update src/a.ts to handle the edge case.');
+    const loop = new AgentLoop(llm as any, registry, { maxSteps: 1, workspace });
+    loopRef = loop;
+    const tracker = (loop as any).cognitiveHarness.fileFixationTracker;
+    tracker.recordFailure('src/a.ts', 100);
+    tracker.recordFailure('src/a.ts', 100);
+
+    await loop.run(session);
+    assert.equal(executed, false, 'frozen mutation must never execute');
+    const blocked = session.getEvents()
+      .filter((event: any) => event.type === 'tool/result')
+      .map((event: any) => event.data?.result)
+      .find((result: any) => result?.reasonCode === 'ANTI_FIXATION_CIRCUIT_BREAKER_BLOCKED');
+    assert.ok(blocked, 'frozen mutation must report the anti-fixation reasonCode');
+  } finally { await fs.rm(rootDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 }); }
+});
+
 test('Evidence Gate does not trigger false positives on 0-file scripts, CommandLine, analysis, or negation', () => {
   const gate = new CompletionEvidenceGate();
 
@@ -534,5 +584,60 @@ test('Implement mode: PlanManager preserves incomplete tasks across turns when c
   assert.equal(plan.getTasks().length, 2);
   assert.ok(plan.getCompletionBlocker()?.includes('Execution plan is incomplete: 2 task(s) remain'));
 });
+
+test('Plan mode and greenfield workspace: evaluateArchitectureAnalysis exempts proposed paths', () => {
+  const existingClaimAnswer = 'Tệp mã nguồn hiện hữu gồm package.json và tsconfig.json và src/app/globals.css.';
+  const mockWorkspace = { rootDir: 'C:/fake-nonexistent-empty-repo' };
+  const blockedWithoutContext = evaluateArchitectureAnalysis(existingClaimAnswer, { workspace: mockWorkspace });
+  assert.equal(blockedWithoutContext?.allow, false);
+  assert.equal(blockedWithoutContext?.reason, 'unverified-architecture-claims');
+
+  const planModeDecision = evaluateArchitectureAnalysis(existingClaimAnswer, {
+    workspace: mockWorkspace,
+    isPlanMode: true,
+  });
+  assert.equal(planModeDecision, undefined);
+
+  const phasePlanDecision = evaluateArchitectureAnalysis(existingClaimAnswer, {
+    workspace: mockWorkspace,
+    phase: 'plan',
+  });
+  assert.equal(phasePlanDecision, undefined);
+
+  const planningRequestDecision = evaluateArchitectureAnalysis(existingClaimAnswer, {
+    workspace: mockWorkspace,
+    userRequest: '[PLANNING MODE REQUEST] Plan the new web application',
+  });
+  assert.equal(planningRequestDecision, undefined);
+});
+
+test('verifyWorkspaceGrounding recognizes bullet list proposal markers', () => {
+  const text = `
+- **MISSING (Tính năng mới - Đề xuất các đường dẫn mục tiêu)**:
+  - package.json
+  - tsconfig.json
+  - src/app/page.tsx
+  `;
+  const result = verifyWorkspaceGrounding(text, { rootDir: 'C:/fake-nonexistent-empty-repo' });
+  assert.deepEqual(result.invalidFiles, []);
+});
+
+test('buildCompletionRecoveryPrompt & selectFinalAnswer prevent double response duplication', () => {
+  const prompt = buildCompletionRecoveryPrompt({
+    reason: 'unverified-evidence',
+    recovery: 'revise-answer',
+    priorAnswerSubstantive: true,
+  });
+  assert.ok(prompt.includes('Do NOT re-generate'));
+  assert.ok(prompt.includes('concise'));
+
+  const prior = 'Detailed explanation of the changes and architecture across 10 files with complete analysis.'.repeat(5);
+  const delta = 'Ghi chú: 1 test fail do server offline (unrelated). Các thay đổi đã sạch sẽ.';
+  const combined = selectFinalAnswer(delta, undefined, undefined, prior);
+  assert.ok(combined.includes(prior));
+  assert.ok(combined.includes(delta));
+  assert.ok(combined.includes('Ghi chú bổ sung'));
+});
+
 
 

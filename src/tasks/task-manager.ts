@@ -25,6 +25,8 @@ export interface BackgroundTaskOptions {
    * a background task inside Docker (`docker exec -i ...`).
    */
   argv?: string[];
+  /** Dev server, watcher, or persistent process expected to remain idle without producing logs. */
+  longLived?: boolean;
 }
 
 export interface BackgroundTask {
@@ -50,19 +52,23 @@ export interface BackgroundTask {
   autoPromoted?: boolean;
   /** Set once a stall notice has released the turn-end gate for this task. */
   stallReleased?: boolean;
+  /** Dev server, watcher, or persistent process expected to remain idle without producing logs. */
+  longLived?: boolean;
 }
 
 /**
  * Pure stall predicate: running task idle beyond `stallIdleMs`, respecting the
- * `renotifyMs` cooldown. Exported for tests.
+ * `renotifyMs` cooldown. Long-lived tasks (servers, watchers) never emit stall notices.
+ * Exported for tests.
  */
 export function shouldEmitStallNotice(
-  task: Pick<BackgroundTask, 'status' | 'lastOutputAt' | 'lastStallNoticeAt'>,
+  task: Pick<BackgroundTask, 'status' | 'lastOutputAt' | 'lastStallNoticeAt'> & { longLived?: boolean },
   now: number,
   stallIdleMs: number,
   renotifyMs: number,
 ): boolean {
   if (task.status !== 'running') return false;
+  if (task.longLived) return false;
   if (now - task.lastOutputAt < stallIdleMs) return false;
   return now - (task.lastStallNoticeAt || 0) >= renotifyMs;
 }
@@ -109,6 +115,7 @@ export class TaskManager {
       sessionId: options?.sessionId,
       turn: options?.turn,
       autoPromoted: options?.autoPromoted,
+      longLived: options?.longLived,
     };
 
     // Khởi chạy child process với shell và env đã scrub (không leak host secrets).
@@ -135,6 +142,7 @@ export class TaskManager {
         if (line.trim()) {
           task.logs.push(`[${new Date().toLocaleTimeString('vi-VN')}] ${line}`);
           task.lastOutputAt = Date.now();
+          task.stallReleased = false;
           if (task.logs.length > 1000) {
             task.logs.shift();
           }
@@ -148,7 +156,7 @@ export class TaskManager {
     if (options?.inbox && task.sessionId) this.inboxes.set(id, options.inbox);
 
     const watchdog = setInterval(() => {
-      if (shouldEmitStallNotice(task, Date.now(), STALL_IDLE_MS, STALL_RENOTIFY_MS)) {
+      if (!task.stallReleased && shouldEmitStallNotice(task, Date.now(), STALL_IDLE_MS, STALL_RENOTIFY_MS)) {
         this.emitStallFor(task);
       }
     }, 5_000);

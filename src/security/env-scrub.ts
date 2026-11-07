@@ -3,6 +3,7 @@
  * Goal: host secrets never leak into spawned processes or back into LLM context.
  * Cost when idle: zero (pure functions, no I/O, no schema weight).
  */
+import path from 'node:path';
 import type { GateReader } from './full-access-gates.js';
 
 const SECRET_KEY_PATTERN = /(secret|token|api[_-]?key|password|passwd|private[_-]?key|auth|bearer|session|credential)/i;
@@ -31,18 +32,47 @@ const HARDENING_DEFAULTS: Record<string, string> = {
   PYTHONIOENCODING: 'utf-8',
 };
 
+export const WORKSPACE_BIN_DIRS = [
+  'node_modules/.bin',
+  'node_modules\\.bin',
+  '.venv/Scripts',
+  '.venv/bin',
+  'venv/Scripts',
+  'venv/bin',
+];
+
+export function prependWorkspaceBinDirs(currentPath: string, workspaceRoot?: string): string {
+  if (!workspaceRoot) return currentPath;
+  const delimiter = path.delimiter;
+  const parts = currentPath ? currentPath.split(delimiter) : [];
+  const toAdd: string[] = [];
+  for (const binDir of WORKSPACE_BIN_DIRS) {
+    const full = path.resolve(workspaceRoot, binDir);
+    if (!parts.includes(full) && !toAdd.includes(full)) {
+      toAdd.push(full);
+    }
+  }
+  if (toAdd.length === 0) return currentPath;
+  return currentPath ? `${toAdd.join(delimiter)}${delimiter}${currentPath}` : toAdd.join(delimiter);
+}
+
 /** Minimal safe base env (mirrors LocalProcessSandbox allowlist). */
-export function buildSafeChildEnv(extra?: Record<string, string>, gates?: GateReader): Record<string, string> {
+export function buildSafeChildEnv(extra?: Record<string, string>, gates?: GateReader, workspaceRoot?: string): Record<string, string> {
   if (gates?.('child_env_scrub')) {
     // Gate 7: token của host phải tới được gh/aws/gcloud — env con là process.env + extra.
     const hostEnv: Record<string, string> = {};
     for (const [key, value] of Object.entries(process.env)) {
       if (typeof value === 'string') hostEnv[key] = value;
     }
+    if (workspaceRoot) {
+      hostEnv.PATH = prependWorkspaceBinDirs(hostEnv.PATH || '', workspaceRoot);
+    }
     return { ...hostEnv, ...HARDENING_DEFAULTS, ...(extra || {}) };
   }
+  const rawPath = extra?.PATH || process.env.PATH || '';
+  const finalPath = workspaceRoot ? prependWorkspaceBinDirs(rawPath, workspaceRoot) : rawPath;
   const base: Record<string, string> = {
-    PATH: process.env.PATH || '',
+    PATH: finalPath,
     HOME: process.env.HOME || process.env.USERPROFILE || '',
     USER: process.env.USER || process.env.USERNAME || '',
     ...(process.platform === 'win32'
@@ -63,6 +93,11 @@ export function buildSafeChildEnv(extra?: Record<string, string>, gates?: GateRe
     // redacted from output downstream instead of being dropped.
     for (const [k, v] of Object.entries(extra)) {
       if (typeof v === 'string') base[k] = v;
+    }
+    if (workspaceRoot && !extra.PATH) {
+      base.PATH = finalPath;
+    } else if (workspaceRoot && extra.PATH) {
+      base.PATH = prependWorkspaceBinDirs(extra.PATH, workspaceRoot);
     }
   }
   return base;

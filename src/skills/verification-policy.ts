@@ -270,7 +270,9 @@ export class VerificationPolicy {
     const isTrivialDirectRun = !isVerification && success && this.isTrivialDirectRunCommand(command);
     const effectiveSuccess = success && (isVerification || isTrivialDirectRun) && options?.hasNewFailures !== true;
 
-    const tier = options?.tier || (isTrivialDirectRun ? 'structural' : this.inferTier(command));
+    const tier = (isVerification || isTrivialDirectRun)
+      ? (options?.tier || (isTrivialDirectRun ? 'structural' : this.inferTier(command)))
+      : undefined;
     // Edge-case coverage is evaluated from harness-measured state only
     // (modified files, blast-impacted suites) — never LLM self-assessment.
     // Unevaluable runs yield 'unknown' and change nothing (fail-open).
@@ -290,7 +292,7 @@ export class VerificationPolicy {
       })
       : undefined;
 
-    this.lastVerification = {
+    const record: VerificationRecord = {
       command,
       success: effectiveSuccess,
       timestamp: new Date().toISOString(),
@@ -302,7 +304,15 @@ export class VerificationPolicy {
       ...(coverage ? { coverage } : {}),
     };
 
-    this.verificationHistory.push(this.lastVerification);
+    // Non-verification commands (e.g. git diff, git status, inspection tools)
+    // must not clobber an already-established successful verification record.
+    if (isVerification || isTrivialDirectRun) {
+      this.lastVerification = record;
+    } else if (!this.lastVerification || !this.lastVerification.success) {
+      this.lastVerification = record;
+    }
+
+    this.verificationHistory.push(record);
 
     if (effectiveSuccess) {
       if (this.pendingTargetedTests.size > 0) {

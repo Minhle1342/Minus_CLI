@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { replaceTextTool } from './replace-text.js';
 import { readFileTool } from './read-file.js';
+import { writeFileTool } from './write-file.js';
 
 test('replace_text schema requires re-reading and rebuilding an edit after a hash conflict', () => {
   const properties = replaceTextTool.parameters!.properties!;
@@ -27,3 +28,16 @@ test('replace_text schema documents line-number tolerance and suggestedOldText r
   assert.match(properties.oldText.description!, /line-number prefixes/i);
   assert.match(properties.matchMode.description!, /line-number prefixes/i);
 });
+
+test('replace_text and write_file schemas instruct LLM on bug fixing workflow with run_command and read_file', () => {
+  assert.match(replaceTextTool.description, /Bug\/error fix workflow/i);
+  assert.match(replaceTextTool.description, /run_command/);
+  assert.match(replaceTextTool.description, /read_file/);
+  assert.match(replaceTextTool.description, /Verify/i);
+
+  assert.match(writeFileTool.description, /Workflow guidance/i);
+  assert.match(writeFileTool.description, /run_command/);
+  assert.match(writeFileTool.description, /read_file/);
+  assert.match(writeFileTool.description, /replace_text/);
+});
+

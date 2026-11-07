@@ -24,7 +24,10 @@ export interface TerminalTruncationResult {
  */
 export function stripAnsi(text: string): string {
   if (!text) return '';
-  return text.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
+  return text
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '')
+    .replace(/\x1b\([A-Za-z0-9]/g, '')
+    .replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, '');
 }
 
 /**
@@ -46,6 +49,8 @@ export function collapseCarriageReturns(text: string): string {
     const parts = line.split('\r').map((p) => p.trimEnd()).filter(Boolean);
     if (parts.length > 0) {
       collapsedLines.push(parts[parts.length - 1]);
+    } else {
+      collapsedLines.push('');
     }
   }
 

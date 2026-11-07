@@ -1,4 +1,5 @@
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import { Workspace } from '../workspace/workspace.js';
 import type { Session } from '../session/session.js';
@@ -90,11 +91,7 @@ export class ProjectMemoryManager {
       scripts: {},
       keyDirectories: {},
       dependenciesSummary: [],
-      codingConventions: [
-        'TypeScript strict mode',
-        'Surgical edits with replace_text',
-        'Run test verification before concluding',
-      ],
+      codingConventions: [],
       learnedInsights: [],
       lastIndexed: new Date().toISOString(),
       isMonorepo: false,
@@ -823,12 +820,43 @@ export class ProjectMemoryManager {
   }
 
   /**
+   * Kiểm tra xem workspace có phải là dự án mới tinh / rỗng hay không.
+   * ponytail: check in-memory metadata first; only read top-level directory if metadata is empty.
+   */
+  isWorkspaceEmpty(): boolean {
+    if (
+      Object.keys(this.memoryData.scripts).length > 0 ||
+      Object.keys(this.memoryData.keyDirectories).length > 0 ||
+      this.memoryData.dependenciesSummary.length > 0 ||
+      (this.memoryData.monorepoWorkspaces && this.memoryData.monorepoWorkspaces.length > 0)
+    ) {
+      return false;
+    }
+    try {
+      const entries = fsSync.readdirSync(this.workspaceDir);
+      const userEntries = entries.filter((name) => !name.startsWith('.'));
+      return userEntries.length === 0;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * Tạo bản tóm tắt "Project Knowledge Digest" ngắn gọn (~150 tokens) để nạp sẵn cho LLM.
    * Áp dụng Task-Conditioned Relevance Scoring: Sắp xếp các script, monorepo workspaces và chỉ dẫn
    * phù hợp nhất với task/query hiện tại lên đầu thay vì cắt ngọn 5 phần tử cố định.
    * Bảo toàn 100% KV-Cache Prefix Alignment và cấu trúc dòng khi không có query.
    */
   getProjectDigest(queryOrOptions?: string | ProjectDigestOptions): string {
+    if (this.isWorkspaceEmpty()) {
+      return [
+        `[PROJECT KNOWLEDGE BASE - WARM START MEMORY]`,
+        `- Project: ${this.memoryData.projectName} (Empty / Greenfield Workspace)`,
+        `[PROJECT STATE: NEW / EMPTY WORKSPACE]`,
+        `This workspace is currently empty. No source files exist yet. Do not explore or inspect; start immediately by scaffolding required project files (e.g. package.json, src/, config).`,
+      ].join('\n');
+    }
+
     const options: ProjectDigestOptions = typeof queryOrOptions === 'string'
       ? { query: queryOrOptions }
       : (queryOrOptions || {});
@@ -986,7 +1014,7 @@ export class ProjectMemoryManager {
         ? [...this.memoryData.codingConventions].sort((a, b) => scoreConvention(b) - scoreConvention(a))
         : this.memoryData.codingConventions;
 
-      lines.push(`- Project instructions (AGENTS.md): ${sortedConventions.slice(0, 3).join('; ')}`);
+      lines.push(`- Project instructions: ${sortedConventions.slice(0, 3).join('; ')}`);
     }
 
     return lines.join('\n');

@@ -43,6 +43,17 @@ test('stall notice is emitted once per idle window and re-notified after the coo
   assert.equal(shouldEmitStallNotice({ status: 'running', lastOutputAt: now - 46_000 }, now, 45_000, 60_000), true);
   assert.equal(shouldEmitStallNotice({ status: 'running', lastOutputAt: now - 46_000, lastStallNoticeAt: now - 1_000 }, now, 45_000, 60_000), false);
   assert.equal(shouldEmitStallNotice({ status: 'stopped', lastOutputAt: now - 46_000 }, now, 45_000, 60_000), false);
+  assert.equal(shouldEmitStallNotice({ status: 'running', lastOutputAt: now - 46_000, longLived: true }, now, 45_000, 60_000), false, 'longLived tasks must never emit stall notices');
+});
+
+test('startTask propagates longLived option to background task', () => {
+  const tm = new TaskManager(process.cwd());
+  const task = tm.startTask('node -e "process.exit(0)"', process.cwd(), {}, {
+    sessionId: 's-long',
+    turn: 1,
+    longLived: true,
+  });
+  assert.equal(task.longLived, true);
 });
 
 test('completion notice redacts secrets from the log tail', async () => {

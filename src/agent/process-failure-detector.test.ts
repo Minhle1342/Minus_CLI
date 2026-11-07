@@ -46,3 +46,33 @@ test('verification tool and background terminal observations use actual outcomes
   assert.equal(detector.observe({ toolName: 'manage_task', args: { action: 'status' }, result: { action: 'status', commandCompletion: { completed: true, terminalStatus: 'completed', command: 'npm test', exitCode: 1, commandOutcome: 'failed_unexpected' } } }), null);
   assert.equal(verify(detector, { exitCode: 1 })?.type, 'LOCALIZATION_FAILURE_BACKTRACK');
 });
+
+test('run_command with relevant command does not trigger RELEVANCE_DRIFT in exploration phase', () => {
+  const detector = new ProcessFailureDetector('Fix bug in auth controller src/auth/login.ts');
+  for (let i = 0; i < 5; i++) {
+    const intervention = detector.observe({
+      toolName: 'run_command',
+      args: { command: 'cat src/auth/login.ts' },
+      result: { exitCode: 0, stdout: 'export class LoginController {}' },
+    });
+    assert.equal(intervention, null, 'relevant run_command must not trigger drift');
+  }
+});
+
+test('run_command with 4 consecutive irrelevant survey operations triggers RELEVANCE_DRIFT', () => {
+  const detector = new ProcessFailureDetector('Fix bug in auth controller src/auth/login.ts');
+  for (let i = 0; i < 3; i++) {
+    const intervention = detector.observe({
+      toolName: 'run_command',
+      args: { command: 'cat docs/unrelated-changelog.md' },
+      result: { exitCode: 0, stdout: 'changelog' },
+    });
+    assert.equal(intervention, null);
+  }
+  const fourth = detector.observe({
+    toolName: 'run_command',
+    args: { command: 'cat docs/unrelated-changelog.md' },
+    result: { exitCode: 0, stdout: 'changelog' },
+  });
+  assert.equal(fourth?.type, 'RELEVANCE_DRIFT');
+});

@@ -30,7 +30,7 @@ import { findRecipeForBinary } from '../toolchains/toolchain-recipes.js';
 import { findMissingExecutable } from '../sandbox/command-diagnostics.js';
 import { evaluateHostCommandPolicy, mustBlockUnisolatedAutoExecution, isSafeDevCommand } from '../sandbox/command-isolation-policy.js';
 import { classifyGitCommand, parseGitInvocation, validateGitCommandScope } from './git-command-policy.js';
-import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText } from '../security/env-scrub.js';
+import { buildSafeChildEnv, collectSecretsFromEnv, redactSecretsFromText, prependWorkspaceBinDirs } from '../security/env-scrub.js';
 import { gatesFromPermissionManager } from '../security/full-access-gates.js';
 import { evaluateCommandHooks } from '../sandbox/command-hooks.js';
 import {
@@ -174,6 +174,14 @@ const ALLOWED_COMMAND_PREFIXES = [
   'pnpm t ',
   'pnpm run ',
   'pnpm build',
+  'next ',
+  'next',
+  'npx next ',
+  'npx next',
+  'vite ',
+  'vite',
+  'turbo ',
+  'turbo',
   'yarn ',
   'yarn',
   'yarn test',
@@ -930,16 +938,18 @@ export interface CatParsedOptions {
 /** Parse 1 segment đọc (cat/type/head/tail). head/tail không kèm file → head/tail (stdin). */
 function parseReadSegment(segment: string): CatParsedOptions | null {
   const trimmed = segment.trim();
-  const headMatch = trimmed.match(/^head(?:\s+-n\s+(\d+))?(?:\s+(.+))?$/i);
+  const headMatch = trimmed.match(/^head(?:\s+(?:-n\s*(\d+)|-(\d+)))?(?:\s+(.+))?$/i);
   if (headMatch) {
-    const lines = headMatch[1] ? parseInt(headMatch[1], 10) : 20;
-    const fileToken = headMatch[2]?.trim().replace(/^["']|["']$/g, '');
+    const rawLines = headMatch[1] || headMatch[2];
+    const lines = rawLines ? parseInt(rawLines, 10) : 20;
+    const fileToken = headMatch[3]?.trim().replace(/^["']|["']$/g, '');
     return fileToken ? { filePath: fileToken, headLines: lines } : { headLines: lines };
   }
-  const tailMatch = trimmed.match(/^tail(?:\s+-n\s+(\d+))?(?:\s+(.+))?$/i);
+  const tailMatch = trimmed.match(/^tail(?:\s+(?:-n\s*(\d+)|-(\d+)))?(?:\s+(.+))?$/i);
   if (tailMatch) {
-    const lines = tailMatch[1] ? parseInt(tailMatch[1], 10) : 20;
-    const fileToken = tailMatch[2]?.trim().replace(/^["']|["']$/g, '');
+    const rawLines = tailMatch[1] || tailMatch[2];
+    const lines = rawLines ? parseInt(rawLines, 10) : 20;
+    const fileToken = tailMatch[3]?.trim().replace(/^["']|["']$/g, '');
     return fileToken ? { filePath: fileToken, tailLines: lines } : { tailLines: lines };
   }
   const catMatch = trimmed.match(/^(?:cat|type)\s+(.+)$/i);
@@ -1077,7 +1087,8 @@ export function parseLsCommand(command: string): LsParsedOptions | null {
   }
 
   for (const token of tokens) {
-    if (token.startsWith('-') || token.startsWith('/')) {
+    const isSwitch = (token.startsWith('-') && token.length > 1) || (/^\/[a-zA-Z]$/i.test(token));
+    if (isSwitch) {
       const lower = token.toLowerCase();
       if (lower.includes('a')) all = true;
       if (lower.includes('l')) long = true;
@@ -1284,7 +1295,7 @@ export function parseRmCommand(command: string): RmParsedOptions | null {
       recursive = true;
     } else if (lower === '-force') {
       force = true;
-    } else if (token.startsWith('-') || token.startsWith('/')) {
+    } else if ((token.startsWith('-') && token.length > 1) || (/^\/[a-zA-Z]$/i.test(token))) {
       if (/r/i.test(token)) recursive = true;
       if (/f|q/i.test(token)) force = true;
     } else {
@@ -1436,7 +1447,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
         },
         execution_target: {
           type: Type.STRING,
-          description: 'Execution target: "auto" (default; prefers the isolated Internal/sandbox environment when available, but does not guarantee the sandbox is available; guardrails may reject commands requiring isolation instead of silently running them on the Host) or "host" (External; the host operating system). Choose "host" only when a host-native toolchain/dependency is needed or the sandbox is incompatible. Host policy always applies: allowlisted commands may run without approval, commands outside the allowlist may require approval, and approval does not override policy prohibitions.',
+          description: 'Execution target: "auto" / "internal" (default; prefers the isolated Internal/sandbox environment when available, but falls back to host for safe dev commands; guardrails may reject commands requiring isolation instead of silently running them on the Host) or "host" / "external" (External; the host operating system). Choose "host" only when a host-native toolchain/dependency is needed or the sandbox is incompatible. Host policy always applies: allowlisted commands may run without approval, commands outside the allowlist may require approval, and approval does not override policy prohibitions.',
         },
         shell: {
           type: Type.STRING,
@@ -1451,7 +1462,15 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       const effectivePermissionManager = context?.permissionManager || permissionManager;
       /** Reader gate full access — đọc effectiveMode() live, thiếu nguồn thì đóng. */
       const gates = gatesFromPermissionManager(effectivePermissionManager);
-      const requestedTarget = String(args.execution_target || 'auto').trim().toLowerCase();
+      const rawTarget = String(args.execution_target || 'auto').trim().toLowerCase();
+      const targetMap: Record<string, string> = {
+        internal: 'auto',
+        sandbox: 'auto',
+        external: 'host',
+        host: 'host',
+        auto: 'auto',
+      };
+      const requestedTarget = targetMap[rawTarget] || rawTarget;
       // Gate 4 (docker_isolation): full access chạy ở host, bỏ hẳn substrate — trong
       // container vẫn không ghi được ngoài mount point nên không giữ nổi lời hứa gate 3.
       const executionTarget = gates('docker_isolation') && requestedTarget === 'auto' ? 'host' : requestedTarget;
@@ -1463,7 +1482,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       if (!['auto', 'host'].includes(executionTarget)) {
         return {
           command: rawCommand,
-          error: 'execution_target only accepts "auto" or "host".',
+          error: 'execution_target only accepts "auto", "host", "internal", or "external".',
           errorCode: 'INVALID_EXECUTION_TARGET',
         };
       }
@@ -1878,6 +1897,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           autoPromoted: false,
           inbox: (context as any)?.inbox,
           gates,
+          longLived: Boolean(longLived),
           ...(isolatedArgv ? { argv: isolatedArgv } : {}),
         });
         const detachedNote: Record<string, any> = isolatedArgv
@@ -2027,7 +2047,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
           timeoutMs: timeoutMs,
           signal: context?.signal,
           env: {
-            ...buildSafeChildEnv(dispatchEnv, gates),
+            ...buildSafeChildEnv(dispatchEnv, gates, workspace.rootDir),
             ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}),
           },
         });
@@ -2050,9 +2070,9 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                 timeoutMs: timeoutMs,
                 signal: context?.signal,
                 env: {
-                  ...buildSafeChildEnv(dispatchEnv, gates),
+                  ...buildSafeChildEnv(dispatchEnv, gates, workspace.rootDir),
                   ...(networkGitCommand ? { GCM_INTERACTIVE: 'never' } : {}),
-                  ...(process.env.PATH ? { PATH: process.env.PATH } : {}),
+                  ...(process.env.PATH ? { PATH: prependWorkspaceBinDirs(process.env.PATH, workspace.rootDir) } : {}),
                 },
               });
               if (retryResult.exitCode === 0 || retryResult.success) {
@@ -2087,7 +2107,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             return annotateCommandResult(rawCommand, {
               command: rawCommand,
               stdout: truncateOutput(emulated.stdout),
-              stderr: '',
+              stderr: emulated.stderr ? truncateOutput(emulated.stderr) : '',
               exitCode: emulated.exitCode,
               durationMs: emulated.durationMs,
               sandbox: 'local',
@@ -2182,7 +2202,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
             return annotateCommandResult(rawCommand, {
               command: rawCommand,
               stdout: truncateOutput(emulated.stdout),
-              stderr: '',
+              stderr: emulated.stderr ? truncateOutput(emulated.stderr) : '',
               exitCode: emulated.exitCode,
               durationMs: emulated.durationMs,
               sandbox: res.sandboxType,
@@ -2247,7 +2267,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
       }
 
       // Fallback has no sandbox boundary: never inherit the full host env.
-      const fallbackEnv = buildSafeChildEnv(dispatchEnv, gates);
+      const fallbackEnv = buildSafeChildEnv(dispatchEnv, gates, workspace.rootDir);
       const finalizeWithSecrets = (r: Record<string, any>) =>
         finalizeCommandResult({ command: effectiveCommand, ...r, envForRedaction: dispatchEnv }, workspace, advisoryExtra);
       return new Promise((resolve) => {
@@ -2291,7 +2311,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                         timeout: timeoutMs,
                         signal: context?.signal,
                         maxBuffer: MAX_COMMAND_BUFFER_BYTES,
-                        env: buildSafeChildEnv(dispatchEnv, gates),
+                        env: buildSafeChildEnv(dispatchEnv, gates, workspace.rootDir),
                       },
                       (retryErr, retryStdout, retryStderr) => {
                         const retryExit = retryErr ? (retryErr.code ?? 1) : 0;
@@ -2334,7 +2354,7 @@ export function createRunCommandTool(sandboxManager?: SandboxManager, taskManage
                   resolve(annotateCommandResult(effectiveCommand, {
                     command: effectiveCommand,
                     stdout: truncateOutput(emulated.stdout),
-                    stderr: '',
+                    stderr: emulated.stderr ? truncateOutput(emulated.stderr) : '',
                     exitCode: emulated.exitCode,
                     durationMs: emulated.durationMs,
                     sandboxType: 'local' as const,

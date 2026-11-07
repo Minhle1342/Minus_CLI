@@ -190,7 +190,7 @@ export class FileFixationTracker {
       this.fileFailures.set(norm, current);
       return {
         frozen: true,
-        message: `ANTI_FIXATION_CIRCUIT_BREAKER: Target file '${filePath}' has failed verification ${current.consecutiveFailures} consecutive times. Mutations on this file are FROZEN for turn ${currentTurn} to break tunnel vision. Inspect upstream callers, configurations, or schemas before re-attempting modification.`,
+        message: `File mutation blocked after repeated verification failures. Please inspect upstream callers, configurations, or schemas before retrying.`,
       };
     }
     this.fileFailures.set(norm, current);
@@ -212,7 +212,7 @@ export class FileFixationTracker {
     if (currentTurn <= entry.frozenUntilTurn) {
       return {
         frozen: true,
-        reason: `ANTI_FIXATION_CIRCUIT_BREAKER: Target file '${filePath}' is currently FROZEN due to ${entry.consecutiveFailures} consecutive failed mutation/verification attempts. You MUST inspect upstream callers, dependencies, or schemas first before editing this file again.`,
+        reason: `File is frozen due to repeated verification failures. Please inspect upstream callers, configurations, or schemas before editing again.`,
       };
     }
     return { frozen: false };

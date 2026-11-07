@@ -106,6 +106,19 @@ test('Trivial single-script direct run exit 0 counts as verification (R0)', () =
   assert.equal(multi.canComplete().allowed, false);
 });
 
+test('Non-verification command does not clobber prior successful verification', () => {
+  const policy = new VerificationPolicy();
+  policy.recordModification('src/app.ts');
+  policy.recordVerification('npm test', true, 'all tests passed', 0);
+  assert.equal(policy.canComplete().allowed, true);
+
+  // Review command (git diff, git status) must not clobber green verification
+  policy.recordVerification('git diff', false, 'fatal: Not a git repository', 129);
+  assert.equal(policy.canComplete().allowed, true, 'prior green verification must not be clobbered by git diff');
+  assert.equal(policy.getLastVerification()?.command, 'npm test');
+  assert.equal(policy.getLastVerification()?.success, true);
+});
+
 test('Comment-only edits bypass the test gate, code edits revoke it', () => {
   assert.equal(isCommentOnlyChange('const a = 1;', 'const a = 1;\n// note'), true);
   assert.equal(isCommentOnlyChange('const a = 1;', 'const a = 2; // note'), false);

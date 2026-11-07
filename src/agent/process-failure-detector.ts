@@ -233,13 +233,22 @@ export class ProcessFailureDetector {
 
     // 2. Kiểm tra Relevance Drift ở giai đoạn Exploration / Localization
     if (INSPECTION_TOOLS.has(toolName) && !toolResultFailed(result)) {
-      const inspectedTarget = (args.TargetFile || args.AbsolutePath || args.path || args.Query || args.query || '').toString().toLowerCase();
+      const rawTarget = args.TargetFile
+        || args.AbsolutePath
+        || args.path
+        || args.Query
+        || args.query
+        || (toolName === 'run_command' ? (args.command || args.CommandLine || extractCommandString(args, result) || '') : '');
+      const inspectedTarget = (rawTarget || '').toString().toLowerCase();
       if (inspectedTarget) {
         this.inspectedFiles.push(inspectedTarget);
       }
 
       const unaccentedTarget = inspectedTarget.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-      const isRelevant = this.taskKeywords.length < 3 || this.taskKeywords.some((kw) => inspectedTarget.includes(kw) || unaccentedTarget.includes(kw));
+      const isRelevant = !inspectedTarget
+        || isVerificationCommand(inspectedTarget)
+        || this.taskKeywords.length < 3
+        || this.taskKeywords.some((kw) => inspectedTarget.includes(kw) || unaccentedTarget.includes(kw));
 
       if (!isRelevant) {
         this.consecutiveDriftingSteps++;

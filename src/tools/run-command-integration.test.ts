@@ -9,7 +9,9 @@ import {
   parseCatCommand,
   executeLsEmulation,
   parseLsCommand,
+  parseRmCommand,
 } from './run-command.js';
+import { executeRipgrepEmulation, parseRipgrepCommand } from './rg-emulator.js';
 import { Workspace } from '../workspace/workspace.js';
 
 test('auto execution refuses a Docker-to-local downgrade for a mutating command', async () => {
@@ -324,6 +326,79 @@ test('Integration Phase 3: Ls emulation executes in <5ms on Windows without miss
     assert.equal(toolRes.success, true);
     assert.match(toolRes.stdout, /file1\.txt/);
     assert.ok(!toolRes.stderr || toolRes.stderr.length === 0);
+  } finally {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  }
+});
+
+test('Emulator Layer: parseRmCommand and parseLsCommand handle POSIX absolute-style paths correctly', () => {
+  const parsedRm = parseRmCommand('rm -rf /dist');
+  assert.ok(parsedRm);
+  assert.equal(parsedRm.recursive, true);
+  assert.equal(parsedRm.force, true);
+  assert.deepEqual(parsedRm.targetPaths, ['/dist']);
+
+  const parsedLs = parseLsCommand('ls /tmp');
+  assert.ok(parsedLs);
+  assert.equal(parsedLs.targetPath, '/tmp');
+});
+
+test('Emulator Layer: parseCatCommand supports head -n5 and head -5 without whitespace', () => {
+  const p1 = parseCatCommand('head -n5 sample.txt');
+  assert.ok(p1);
+  assert.equal(p1.headLines, 5);
+  assert.equal(p1.filePath, 'sample.txt');
+
+  const p2 = parseCatCommand('head -10 sample.txt');
+  assert.ok(p2);
+  assert.equal(p2.headLines, 10);
+  assert.equal(p2.filePath, 'sample.txt');
+
+  const p3 = parseCatCommand('tail -15 sample.txt');
+  assert.ok(p3);
+  assert.equal(p3.tailLines, 15);
+  assert.equal(p3.filePath, 'sample.txt');
+});
+
+test('Emulator Layer: executeRipgrepEmulation supports smart-case and negative glob', async () => {
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-rg-emu-test-'));
+  try {
+    await fs.writeFile(path.join(tempDir, 'main.ts'), 'const TargetSymbol = 123;\nconst targetsymbol = 456;\n', 'utf-8');
+    await fs.writeFile(path.join(tempDir, 'main.test.ts'), 'const TargetSymbol = 123;\n', 'utf-8');
+    await fs.writeFile(path.join(tempDir, 'main.tsx'), 'const TargetSymbol = 789;\n', 'utf-8');
+
+    const workspace = new Workspace(tempDir);
+
+    // 1. Smart-case with uppercase -> case-sensitive
+    const parsedSmartUpper = parseRipgrepCommand('rg -S TargetSymbol .');
+    assert.ok(parsedSmartUpper);
+    assert.equal(parsedSmartUpper.ignoreCase, false);
+
+    const resUpper = await executeRipgrepEmulation(parsedSmartUpper, workspace);
+    assert.equal(resUpper.success, true);
+    assert.match(resUpper.stdout, /TargetSymbol/);
+    assert.doesNotMatch(resUpper.stdout, /targetsymbol/);
+
+    // 2. Smart-case with all lowercase -> case-insensitive
+    const parsedSmartLower = parseRipgrepCommand('rg -S targetsymbol .');
+    assert.ok(parsedSmartLower);
+    assert.equal(parsedSmartLower.ignoreCase, true);
+
+    // 3. Negative glob (!*.test.ts) excludes test files
+    const parsedNegGlob = parseRipgrepCommand('rg TargetSymbol -g !*.test.ts .');
+    assert.ok(parsedNegGlob);
+    const resNeg = await executeRipgrepEmulation(parsedNegGlob, workspace);
+    assert.equal(resNeg.success, true);
+    assert.match(resNeg.stdout, /main\.ts/);
+    assert.doesNotMatch(resNeg.stdout, /main\.test\.ts/);
+
+    // 4. Multiple positive globs are OR-ed (ripgrep union semantics)
+    const parsedMultiGlob = parseRipgrepCommand("rg TargetSymbol -g '*.ts' -g '*.tsx' .");
+    assert.ok(parsedMultiGlob);
+    const resMulti = await executeRipgrepEmulation(parsedMultiGlob, workspace);
+    assert.equal(resMulti.success, true);
+    assert.match(resMulti.stdout, /main\.ts/);
+    assert.match(resMulti.stdout, /main\.tsx/);
   } finally {
     await fs.rm(tempDir, { recursive: true, force: true });
   }

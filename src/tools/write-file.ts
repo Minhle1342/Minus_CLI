@@ -20,7 +20,7 @@ import {
  */
 export const writeFileTool: ToolDefinition = {
   name: 'write_file',
-  description: 'Create a new file or overwrite an entire file in the workspace. Creates missing parent directories; for partial edits use replace_text instead of overwriting the whole file.',
+  description: 'Create a new file or overwrite an entire file in the workspace. Workflow guidance: Use write_file primarily for creating new files, tests, scripts, or complete configurations. For fixing bugs or editing existing files, do NOT overwrite the whole file: first explore/reproduce with `run_command`, inspect the target code with `read_file`, and perform surgical edits with `replace_text`, followed by verification with `run_command`. Creates missing parent directories; for partial edits use replace_text instead of overwriting the whole file.',
   parameters: {
     type: Type.OBJECT,
     properties: {

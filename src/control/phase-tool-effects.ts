@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import type { ToolDefinition } from '../tools/types.js';
 import { ToolDescriptorRegistry } from './tool-descriptor-registry.js';
 import { SandboxPolicyEngine } from '../sandbox/sandbox-policy.js';
+import { isSafeDevCommand } from '../sandbox/command-isolation-policy.js';
 import { classifyGitCommand } from '../tools/git-command-policy.js';
 import { parseShellAst } from '../security/shell-ast-parser.js';
 
@@ -70,6 +71,9 @@ export function checkPhaseToolEffect(
         allowed: false,
         reason: 'Reading workspace codebase files through shell is not allowed in explore/plan phase; use dedicated read_file tool instead.',
       };
+    }
+    if (isSafeDevCommand(command)) {
+      return { allowed: true };
     }
     const result = new SandboxPolicyEngine(workspaceRoot, 'strict').evaluateCommand(command, args.cwd);
     return result.allowed ? { allowed: true } : { allowed: false, reason: result.reason || 'Only inspected read-only command effects are allowed before implementation.' };

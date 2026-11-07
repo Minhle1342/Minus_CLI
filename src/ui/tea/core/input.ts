@@ -4,20 +4,30 @@ const sequences: Record<string, string> = {
   '\x1b[H': 'home', '\x1b[F': 'end', '\x1bOH': 'home', '\x1bOF': 'end',
   '\x1b[1~': 'home', '\x1b[4~': 'end', '\x1b[3~': 'delete', '\x1b[5~': 'pageup', '\x1b[6~': 'pagedown',
   '\x1b[13;2u': 'shift+enter', '\x1b\r': 'alt+enter', '\x1b[27;2;13~': 'shift+enter',
+  '\x1b[Z': 'shift+tab',
+  '\x1b[1;2A': 'shift+up', '\x1b[1;2B': 'shift+down', '\x1b[1;2C': 'shift+right', '\x1b[1;2D': 'shift+left',
+  '\x1b[1;5A': 'ctrl+up', '\x1b[1;5B': 'ctrl+down', '\x1b[1;5C': 'ctrl+right', '\x1b[1;5D': 'ctrl+left',
 };
 export class KeyDecoder {
   private pending = '';
   private paste = false;
   private lastTime = 0;
   feed(data: string, now = Date.now()): KeyMsg[] {
-    if (now - this.lastTime > 250 && this.pending.startsWith('\x1b') && this.pending.length > 1) {
-      this.pending = '';
-      this.paste = false;
+    const messages: KeyMsg[] = [];
+    const key = (name: string, text?: string) => messages.push({ type: 'key', key: name, text, now });
+    if (now - this.lastTime > 250) {
+      if (this.paste) {
+        if (this.pending) {
+          key('paste', this.pending);
+          this.pending = '';
+        }
+        this.paste = false;
+      } else if (this.pending.startsWith('\x1b') && this.pending.length > 1) {
+        this.pending = '';
+      }
     }
     this.lastTime = now;
     this.pending += data;
-    const messages: KeyMsg[] = [];
-    const key = (name: string, text?: string) => messages.push({ type: 'key', key: name, text, now });
     while (this.pending) {
       if (this.paste) {
         const end = this.pending.indexOf('\x1b[201~');
@@ -30,11 +40,15 @@ export class KeyDecoder {
         if (sequence) { key(sequences[sequence]); this.pending = this.pending.slice(sequence.length); continue; }
         const mouse = this.pending.match(/^\x1b\[<([0-9]+);([0-9]+);([0-9]+)([Mm])/);
         if (mouse) {
-          const wheel = Number(mouse[1]) & 0b11000011;
+          const rawBtn = Number(mouse[1]);
+          const wheel = rawBtn & 0b11000011;
           if (mouse[4] === 'M' && (wheel === 64 || wheel === 65)) {
             messages.push({ type: 'key', key: wheel === 64 ? 'mouse+up' : 'mouse+down', mouse: { x: Number(mouse[2]), y: Number(mouse[3]) }, now });
-          } else if ((Number(mouse[1]) & 3) === 0 || mouse[4] === 'm') {
-            messages.push({ type: 'key', key: mouse[4] === 'm' ? 'mouse+release' : (Number(mouse[1]) & 32) ? 'mouse+drag' : 'mouse+press', mouse: { x: Number(mouse[2]), y: Number(mouse[3]) }, now });
+          } else {
+            const isRelease = mouse[4] === 'm';
+            const isDrag = (rawBtn & 32) !== 0;
+            const keyName = isRelease ? 'mouse+release' : isDrag ? 'mouse+drag' : 'mouse+press';
+            messages.push({ type: 'key', key: keyName, mouse: { x: Number(mouse[2]), y: Number(mouse[3]) }, now });
           }
           this.pending = this.pending.slice(mouse[0].length); continue;
         }

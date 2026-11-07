@@ -185,19 +185,29 @@ export function isTestFailureRelatedToCurrentTurn(
   return nameOnlyMatch ? 'ambiguous' : 'unrelated';
 }
 
-export function scopedMutationTargets(toolName: string, args: Record<string, any>): string[] {
+/** Checkpoint/domain guards only operate on files inside the workspace; an absolute shell target must not crash them. */
+function isWorkspaceContained(rootDir: string, target: string): boolean {
+  const relative = path.relative(rootDir, path.resolve(rootDir, target));
+  return Boolean(relative) && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+export function scopedMutationTargets(toolName: string, args: Record<string, any>, workspaceRoot?: string): string[] {
   // Shell deletion rewrites file state just like delete_file; its targets must
   // reach the checkpoint/domain guards before the command runs.
+  let targets: string[];
   if (toolName === 'run_command') {
     const command = String(args?.command ?? args?.CommandLine ?? args?.commandLine ?? args?.cmd ?? '');
-    return parseRmCommand(command)?.targetPaths ?? [];
+    targets = parseRmCommand(command)?.targetPaths ?? [];
+  } else if (!isMutationTool(toolName)) {
+    return [];
+  } else {
+    const set = new Set<string>();
+    const add = (value: unknown) => { if (typeof value === 'string' && value.trim()) set.add(value.trim()); };
+    for (const key of ['path', 'filePath', 'targetFile', 'TargetFile', 'AbsolutePath', 'target_path', 'file_path', 'sourcePath', 'targetPath', 'from', 'to']) add(args[key]);
+    if (Array.isArray(args.targetFiles)) args.targetFiles.forEach(add);
+    targets = [...set];
   }
-  if (!isMutationTool(toolName)) return [];
-  const targets = new Set<string>();
-  const add = (value: unknown) => { if (typeof value === 'string' && value.trim()) targets.add(value.trim()); };
-  for (const key of ['path', 'filePath', 'targetFile', 'TargetFile', 'AbsolutePath', 'target_path', 'file_path', 'sourcePath', 'targetPath', 'from', 'to']) add(args[key]);
-  if (Array.isArray(args.targetFiles)) args.targetFiles.forEach(add);
-  return [...targets];
+  return workspaceRoot ? targets.filter(target => isWorkspaceContained(workspaceRoot, target)) : targets;
 }
 
 /** True khi tool call chạm một file mà subagent fail đã đụng tới (đọc hay ghi). */
@@ -1344,6 +1354,7 @@ export class AgentLoop {
     }
     let consecutiveEmptyTurns = 0;
     let consecutiveIncompleteFinals = 0;
+    let lastSubstantiveCandidateAnswer: string | undefined;
     let consecutivePlanCompletionRejects = 0;
     let consecutiveIncompleteFinishes = 0;
     let consecutiveNoProgressStrategyChanges = 0;
@@ -1570,6 +1581,7 @@ export class AgentLoop {
           steerItem.resolve('');
           consecutiveEmptyTurns = 0;
           consecutiveIncompleteFinals = 0;
+          lastSubstantiveCandidateAnswer = undefined;
           consecutivePlanCompletionRejects = 0;
           consecutiveIncompleteFinishes = 0;
           consecutiveNoProgressStrategyChanges = 0;
@@ -1595,6 +1607,7 @@ export class AgentLoop {
           });
           consecutiveEmptyTurns = 0;
           consecutiveIncompleteFinals = 0;
+          lastSubstantiveCandidateAnswer = undefined;
           consecutivePlanCompletionRejects = 0;
           consecutiveIncompleteFinishes = 0;
           consecutiveNoProgressStrategyChanges = 0;
@@ -3647,7 +3660,7 @@ export class AgentLoop {
               ? { allowed: true, reason: undefined }
               : checkPhaseToolEffect(this.toolProvider.get(toolName) || { name: toolName } as any,
               toolArgs, classification.phase, this._workspace.rootDir);
-            const mutationPaths = scopedMutationTargets(toolName, toolArgs);
+            const mutationPaths = scopedMutationTargets(toolName, toolArgs, this._workspace.rootDir);
             const domainBlock = (mutationPaths.length ? mutationPaths : ['']).map(target =>
               this.domainIntentGuardian.observeToolCall({ toolName, args: { ...toolArgs, ...(target ? { path: target, TargetFile: target } : {}) } }, { workspaceRoot: this._workspace.rootDir }))
               .find(intervention => intervention?.severity === 'BLOCKING');
@@ -5149,7 +5162,8 @@ export class AgentLoop {
         const rawText = response.text ? response.text.trim() : '';
         let finalAnswer = selectFinalAnswer(rawText,
           hasReportedFindings ? reportedFindingsMarkdown : undefined,
-          hasSubmittedSolution ? submittedSolutionSummary : undefined);
+          hasSubmittedSolution ? submittedSolutionSummary : undefined,
+          lastSubstantiveCandidateAnswer);
         consecutiveEmptyTurns = 0;
 
         // A failed subagent leaves unfinished work. The prompt asks for takeover, but
@@ -5241,6 +5255,9 @@ export class AgentLoop {
             hasCodeMutations,
             filesModified: Array.from(this.targetFilesModifiedInTurn),
             workspace: this._workspace,
+            isPlanMode: isPlanModeThisStep,
+            phase: classification.phase,
+            taskClass: initialTurnClassification.taskClass,
           });
         const evidenceDecision = (isSubagent || isMockLLM || !isCompletionEvidenceGateEnabled())
           ? { allow: true, reasons: [] }
@@ -5376,6 +5393,10 @@ export class AgentLoop {
           });
           {
             consecutiveIncompleteFinals++;
+            if (finalAnswer && finalAnswer.trim().length > 150 && !isCompletionStub(finalAnswer)) {
+              lastSubstantiveCandidateAnswer = finalAnswer;
+            }
+            const isPriorAnswerSubstantive = Boolean(lastSubstantiveCandidateAnswer);
             const canRetryIncompleteFinal = consecutiveIncompleteFinals <= maxIncompleteFinalRetries;
             this.adaptiveReasoning.escalate(finalAnswerDecision.reason || 'completion-gate-rejection');
             const reasoningGuidance = this.adaptiveReasoning.getGuidancePrompt({
@@ -5384,7 +5405,9 @@ export class AgentLoop {
             });
 
             const actionMandate = requiresReadOnlySubmission && !isSubagent
-              ? '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: Correct any unsupported claims using existing evidence, then return the revised answer directly as the final answer — do not call submit_solution for read-only answers. Inspect only missing evidence if needed; do not invent edits or verification.'
+              ? (isPriorAnswerSubstantive
+                ? '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: Your previous substantive analysis is recorded. Do NOT re-generate the full plan or report from scratch. Provide ONLY the concise correction or missing evidence/disclosure needed to complete the answer directly as the final answer — do not call submit_solution for read-only answers.'
+                : '[STRONG ADVISORY — READ-ONLY DIRECT ANSWER]: Correct any unsupported claims using existing evidence, then return the revised answer directly as the final answer — do not call submit_solution for read-only answers. Inspect only missing evidence if needed; do not invent edits or verification.')
               : requiresReadOnlySubmission
                 ? `[STRONG ADVISORY — READ-ONLY SUBMIT]: Correct any unsupported claims using existing evidence, then call submit_solution with the actual answer in summary. Inspect only missing evidence if needed; do not invent edits or verification.\n\n${SECTION_PRE_SUBMIT_EVIDENCE_AUDIT}`
                 : buildCompletionRecoveryPrompt({
@@ -5392,6 +5415,7 @@ export class AgentLoop {
                   recovery: finalAnswerDecision.recovery,
                   hasSubmittedSolution,
                   detail: verificationDecision.allowed ? undefined : verificationDecision.reason,
+                  priorAnswerSubstantive: isPriorAnswerSubstantive,
                 });
 
             const fullContinuationPrompt = [
@@ -5462,6 +5486,7 @@ export class AgentLoop {
             bgNotice.resolve('');
             consecutiveEmptyTurns = 0;
             consecutiveIncompleteFinals = 0;
+            lastSubstantiveCandidateAnswer = undefined;
             consecutivePlanCompletionRejects = 0;
             consecutiveIncompleteFinishes = 0;
             consecutiveNoProgressStrategyChanges = 0;
@@ -5475,6 +5500,7 @@ export class AgentLoop {
           continue;
         }
         consecutiveIncompleteFinals = 0;
+        lastSubstantiveCandidateAnswer = undefined;
         this.adaptiveReasoning.reset();
 
         // Strip echoed system-prompt paragraphs before the answer reaches the

@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isAllowedCommand, isAllowedShellCommand } from './run-command.js';
+import { isAllowedCommand, isAllowedShellCommand, createRunCommandTool } from './run-command.js';
+import { Workspace } from '../workspace/workspace.js';
+import { checkPhaseToolEffect } from '../control/phase-tool-effects.js';
+import { prependWorkspaceBinDirs } from '../security/env-scrub.js';
 
 test('everyday task commands are allowlisted without approval', () => {
   for (const cmd of [
@@ -93,3 +96,45 @@ test('only read-only codegraph subcommands skip approval', () => {
     assert.equal(isAllowedShellCommand(cmd), false, cmd);
   }
 });
+
+test('next, vite, turbo and modern build commands are allowlisted', () => {
+  for (const cmd of [
+    'next build',
+    'next lint',
+    'next dev',
+    'next start',
+    'npx next build',
+    'vite build',
+    'turbo build',
+  ]) {
+    assert.equal(isAllowedCommand(cmd), true, `${cmd} must be allowlisted`);
+    assert.equal(isAllowedShellCommand(cmd), true, `${cmd} shell command must be allowlisted`);
+  }
+});
+
+test('run_command accepts execution_target internal and external aliases', async () => {
+  const tool = createRunCommandTool();
+  const internalRes = await tool.execute(
+    { command: 'echo test_internal', execution_target: 'internal' },
+    new Workspace(),
+  );
+  assert.notEqual(internalRes.errorCode, 'INVALID_EXECUTION_TARGET');
+
+  const externalRes = await tool.execute(
+    { command: 'echo test_external', execution_target: 'external' },
+    new Workspace(),
+  );
+  assert.notEqual(externalRes.errorCode, 'INVALID_EXECUTION_TARGET');
+});
+
+test('checkPhaseToolEffect allows safe dev build commands during explore phase', () => {
+  const dummyTool = { name: 'run_command', description: '', parameters: {} as any, execute: async () => ({}) };
+  const res = checkPhaseToolEffect(dummyTool, { command: 'next build' }, 'explore', process.cwd());
+  assert.equal(res.allowed, true);
+});
+
+test('prependWorkspaceBinDirs prepends node_modules/.bin to PATH', () => {
+  const res = prependWorkspaceBinDirs('C:\\Windows\\System32', 'C:\\repo');
+  assert.ok(res.includes('node_modules'));
+});
+

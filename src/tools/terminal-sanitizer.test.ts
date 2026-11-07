@@ -18,6 +18,18 @@ test('Terminal Sanitizer: stripAnsi removes colors, formatting, and cursor movem
   assert.equal(clean, 'Error: File not found [Cursor]');
 });
 
+test('Terminal Sanitizer: stripAnsi strips OSC title sequences and VT100 charset escapes', () => {
+  const oscText = '\x1b]0;Title\x07Hello \x1b(BWorld\x1b]8;;https://example.com\x07Link\x1b]8;;\x07';
+  const clean = stripAnsi(oscText);
+  assert.equal(clean, 'Hello WorldLink');
+});
+
+test('Terminal Sanitizer: collapseCarriageReturns preserves empty lines with carriage returns', () => {
+  const text = 'Line 1\r\n\r\nLine 3\r';
+  const clean = collapseCarriageReturns(text);
+  assert.equal(clean, 'Line 1\n\nLine 3');
+});
+
 test('Terminal Sanitizer: collapseCarriageReturns flattens progress bar spam to final state', () => {
   const progressText = 'Fetching [=>      ] 10%\rFetching [===>    ] 35%\rFetching [======> ] 70%\rFetching [========] 100%';
   const clean = collapseCarriageReturns(progressText);

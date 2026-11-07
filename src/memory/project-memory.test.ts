@@ -27,3 +27,21 @@ test('a corrupt project memory file is quarantined before re-indexing', async ()
     console.warn = originalWarn;
   }
 });
+
+test('getProjectDigest detects empty workspace and outputs greenfield guidance', async () => {
+  const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'minus-greenfield-'));
+  // Simulate CLI creating .codingagent folder
+  await fs.mkdir(path.join(dir, '.codingagent'), { recursive: true });
+
+  const memory = new ProjectMemoryManager(dir);
+  assert.equal(memory.isWorkspaceEmpty(), true);
+
+  const digest = memory.getProjectDigest();
+  assert.match(digest, /\[PROJECT STATE: NEW \/ EMPTY WORKSPACE\]/);
+  assert.match(digest, /No source files exist yet/);
+  assert.doesNotMatch(digest, /AGENTS\.md/);
+
+  // Once a source file exists, it is no longer an empty workspace
+  await fs.writeFile(path.join(dir, 'package.json'), '{"name": "my-app"}');
+  assert.equal(memory.isWorkspaceEmpty(), false);
+});
